@@ -1,0 +1,16 @@
+
+# Python Environment
+venv/
+__pycache__/
+*.pyc
+
+# Local Config (Do NOT upload keys or local paths!)
+config.yaml
+
+# Generated Reports
+output/
+reports/
+*.pdf
+
+# OS generated files
+.DS_Store
