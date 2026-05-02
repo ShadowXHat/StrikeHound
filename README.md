@@ -32,13 +32,12 @@ Before your first run, you must create your local config file:
 ```bash
 cp config.example.yaml config.yaml
 python3 strikehound.py -t [http://example.com](http://example.com) -m standard
+```
 
----
+---⚠️ Legal Disclaimer
 
-## ⚠️ Legal Disclaimer
+This tool is provided for educational purposes only and for use in authorized security auditing environments.
 
-This tool is provided for **educational purposes only** and for use in **authorized security auditing** environments. 
+StrikeHound and its author (ShadowXHat) are not responsible for any misuse, damage, or illegal activities caused by this software. Use this tool only on infrastructure where you have explicit, written permission to perform security testing.
 
-**StrikeHound** and its author (**ShadowXHat**) are not responsible for any misuse, damage, or illegal activities caused by this software. Use this tool only on infrastructure where you have explicit, written permission to perform security testing. Performing unauthorized scans against third-party networks can lead to severe legal consequences.
-
-**Always stay within scope and follow responsible disclosure guidelines.**
+Always stay within scope and follow responsible disclosure guidelines.
