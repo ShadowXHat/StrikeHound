@@ -25,3 +25,13 @@ To run StrikeHound, you must have the following installed on your system:
    ```bash
    git clone [https://github.com/YOUR_USERNAME/StrikeHound.git](https://github.com/YOUR_USERNAME/StrikeHound.git)
    cd StrikeHound
+## 🚀 Usage
+
+### 1. Setup Configuration
+Before your first run, you must create your local config file:
+```bash
+cp config.example.yaml config.yaml
+Run the orchestrator by specifying a target and a scan mode (quick, standard, or full):
+Bash
+
+python3 strikehound.py -t [http://example.com](http://example.com) -m standard
