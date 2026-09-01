@@ -1,6 +1,19 @@
 import requests
 import time
 
+def scan_target(zap, target_url):
+    print("[*] Starting ZAP Spider...")
+    scan_id = zap.spider.scan(target_url)
+    while int(zap.spider.status(scan_id)) < 100:
+        time.sleep(2)
+        
+    print("[*] Starting ZAP Active Scan...")
+    ascan_id = zap.ascan.scan(target_url)
+    while int(zap.ascan.status(ascan_id)) < 100:
+        time.sleep(5)
+        
+    return zap.core.alerts(baseurl=target_url)
+
 def run_scan(target: str, api_url: str = 'http://localhost:8080', api_key: str = '') -> list:
     """Triggers an OWASP ZAP scan via its REST API and returns normalized findings."""
     print(f"    [>] Triggering OWASP ZAP API against {target}")

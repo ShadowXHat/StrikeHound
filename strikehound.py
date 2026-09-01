@@ -15,7 +15,7 @@ import modules.zap_scanner as zap_scanner
 import modules.deduplicator as deduplicator
 import modules.severity_mapper as severity_mapper
 import modules.ssh_audit as ssh_audit
-import reports.pdf_generator as pdf_generator
+from modules import report_generator as report
 
 def load_config(config_path="config.yaml"):
     try:
