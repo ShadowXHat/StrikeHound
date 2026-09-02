@@ -3,6 +3,13 @@ import json
 from fpdf import FPDF
 
 
+def safe_filename_from_target(target: str) -> str:
+    """Turns a target (URL or IP) into a filesystem-safe filename fragment."""
+    cleaned = target.replace("http://", "").replace("https://", "")
+    cleaned = cleaned.replace("/", "_").replace(":", "_")
+    return cleaned
+
+
 def generate_sarif(findings, target, output_file):
     sarif_skeleton = {
         "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
@@ -19,7 +26,7 @@ def generate_sarif(findings, target, output_file):
             "results": []
         }]
     }
-    
+
     for idx, item in enumerate(findings):
         rule_id = f"SH-{idx+1:04d}"
         sarif_skeleton["runs"][0]["results"].append({
@@ -36,22 +43,27 @@ def generate_sarif(findings, target, output_file):
     with open(output_file, 'w') as f:
         json.dump(sarif_skeleton, f, indent=2)
 
-def generate_report(findings, target, output_dir, open_ports):
+
+def generate_report(findings, target, output_dir, open_ports) -> str:
+    """
+    Generates the PDF report and returns the actual path it was written to,
+    so callers (e.g. the Slack notifier) report an accurate filename.
+    """
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    
+
     # Document Header
     pdf.set_font("Arial", 'B', 22)
     pdf.cell(0, 15, txt="StrikeHound Security Report", ln=True, align='C')
     pdf.ln(4)
-    
+
     # Scan Metadata
     pdf.set_font("Arial", 'B', 10)
     pdf.cell(30, 6, "Target:", 0, 0)
     pdf.set_font("Arial", size=10)
     pdf.cell(0, 6, str(target), 0, 1)
-    
+
     pdf.set_font("Arial", 'B', 10)
     pdf.cell(30, 6, "Open Ports:", 0, 0)
     pdf.set_font("Arial", size=10)
@@ -63,7 +75,12 @@ def generate_report(findings, target, output_dir, open_ports):
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(0, 8, txt="Vulnerability Summary", ln=True)
     pdf.ln(2)
-    
+
+    if not findings:
+        pdf.set_font("Arial", size=10)
+        pdf.set_text_color(80, 80, 80)
+        pdf.cell(0, 6, "No findings were reported for this target.", ln=True)
+
     for raw_issue in findings:
         # Normalize issue to dict if passed as string
         if isinstance(raw_issue, str):
@@ -78,29 +95,31 @@ def generate_report(findings, target, output_dir, open_ports):
 
         # Resolve nested info structures
         info = issue.get('info', {}) if isinstance(issue.get('info'), dict) else {}
-        
+
         name = (
-            issue.get('name') 
-            or info.get('name') 
-            or issue.get('alert') 
-            or issue.get('template-id') 
+            issue.get('title')
+            or issue.get('name')
+            or info.get('name')
+            or issue.get('alert')
+            or issue.get('template-id')
             or "Security Finding"
         )
-        
+
         url = (
-            issue.get('matched-at') 
-            or issue.get('url') 
-            or issue.get('host') 
-            or info.get('reference') 
+            issue.get('matched-at')
+            or issue.get('url')
+            or issue.get('host')
+            or issue.get('target')
+            or info.get('reference')
             or target
         )
         if isinstance(url, list):
             url = url[0] if url else target
-            
+
         severity = str(
-            issue.get('severity') 
-            or info.get('severity') 
-            or issue.get('risk') 
+            issue.get('severity')
+            or info.get('severity')
+            or issue.get('risk')
             or 'Info'
         ).capitalize()
 
@@ -113,10 +132,10 @@ def generate_report(findings, target, output_dir, open_ports):
             pdf.set_text_color(30, 100, 200)
         else:
             pdf.set_text_color(80, 80, 80)
-        
+
         pdf.set_font("Arial", 'B', 10)
         pdf.cell(0, 6, f"[{severity}] {name}", ln=True)
-        
+
         pdf.set_font("Arial", size=9)
         pdf.set_text_color(60, 60, 60)
         pdf.multi_cell(0, 5, f"Matched Endpoint: {url}")
@@ -124,8 +143,10 @@ def generate_report(findings, target, output_dir, open_ports):
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    
-    report_path = os.path.join(output_dir, "strikehound_report.pdf")
+
+    filename = f"StrikeHound_Report_{safe_filename_from_target(target)}.pdf"
+    report_path = os.path.join(output_dir, filename)
     pdf.output(report_path)
     print(f"[+] Report generated successfully: {report_path}")
-    
+
+    return report_path

@@ -1,3 +1,4 @@
-fpdf2
+fpdf2==2.7.9
 PyYAML==6.0.1
 requests==2.31.0
+python-nmap==0.7.1
