@@ -13,28 +13,39 @@ By acting as a central brain, StrikeHound eliminates manual scanning fatigue. It
 * **Slack Integration:** Fires real-time webhook alerts to your security team upon scan completion.
 
 ## 🛠️ Prerequisites
+
+* A Debian/Kali-based Linux system (the setup script uses `apt`)
 * Python 3.8+
-* [Nmap](https://nmap.org/)
-* [Nuclei](https://github.com/projectdiscovery/nuclei)
-* [OWASP ZAP](https://www.zaproxy.org/) (local installation, or via `compose.yml`)
+* `sudo` access (to install nmap/nuclei/ZAP if not already present)
+
+Everything else (Nmap, Nuclei, OWASP ZAP, Python packages) is checked for and installed automatically by `setup.sh` below.
 
 ## 🚀 Installation & Setup
 
 ```bash
 git clone https://github.com/ShadowXHat/StrikeHound.git
 cd StrikeHound
-pip install -r requirements.txt
+chmod +x setup.sh scan.sh
+./setup.sh
 ```
 
-### Configuration
+`setup.sh` will:
+* Check for nmap, nuclei, and OWASP ZAP - installing any that are missing
+* Create a Python virtual environment and install dependencies into it
+* Auto-generate `config.yaml` with the correct paths for your system
 
-Before your first run, create your local config file from the template:
+You only need to run this once. To customize settings afterward (e.g. add a Slack webhook), edit `config.yaml` directly.
+
+### Alternative: Docker
+
+If you'd rather not install tools directly on your system (e.g. running on a non-Kali machine, or want isolation), a `Dockerfile` and `compose.yml` are also included:
 
 ```bash
-cp config.example.yaml config.yaml
+docker compose build
+docker compose run --rm strikehound -t http://example.com -m standard
 ```
 
-Then edit `config.yaml`:
+This is optional - the native `setup.sh` path above is recommended if you're already on Kali or a similar pentesting distro, since it uses tools you likely already have instead of duplicating them inside a container.
 
 | Key | Description |
 |---|---|
@@ -52,6 +63,12 @@ Then edit `config.yaml`:
 ## 🚀 Usage
 
 ```bash
+./scan.sh http://example.com quick
+```
+
+Or call the script directly for full control:
+```bash
+source venv/bin/activate
 python3 strikehound.py -t http://example.com -m standard
 ```
 
@@ -62,13 +79,9 @@ python3 strikehound.py -t http://example.com -m standard
 | `-o`, `--output-dir` | Where to write the report and scan output | `./output` |
 | `--no-report` | Skip PDF generation | off |
 
-### Docker Compose
+### Docker Compose (optional)
 
-A `compose.yml` is included to run ZAP + StrikeHound together:
-
-```bash
-docker compose up
-```
+A `compose.yml` is also included if you'd rather run via Docker instead of `setup.sh` — see the Installation section above.
 
 ## ⚠️ Legal Disclaimer
 

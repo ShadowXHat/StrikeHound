@@ -67,7 +67,10 @@ def main():
         zap_api_url = config.get('tools', {}).get('zap_api_url', 'http://localhost:8080')
 
         if not zap_path:
-            print("    [-] No zap_path configured - skipping ZAP entirely for this run.")
+            # No zap_path means ZAP is externally managed (e.g. a separate
+            # Docker container). We don't launch it ourselves, but it may
+            # still be reachable over the network - check for that below.
+            print("    [-] No zap_path configured - assuming ZAP is externally managed.")
             zap_process = None
         else:
             try:
@@ -80,12 +83,12 @@ def main():
                 print(f"    [!] Could not launch ZAP at '{zap_path}' - check tools.zap_path in config.yaml. ({e})")
                 zap_process = None
 
-        if zap_process:
-            print(f"    [~] Waiting up to {ZAP_BOOT_TIMEOUT_SECONDS}s for ZAP to become ready...")
-            if zap_scanner.wait_for_zap(zap_api_url, max_wait=ZAP_BOOT_TIMEOUT_SECONDS):
-                print("    [+] ZAP daemon is ready.")
-            else:
-                print("    [!] ZAP did not become ready in time - ZAP scan phase will be skipped.")
+        print(f"    [~] Waiting up to {ZAP_BOOT_TIMEOUT_SECONDS}s for ZAP to become ready at {zap_api_url}...")
+        zap_available = zap_scanner.wait_for_zap(zap_api_url, max_wait=ZAP_BOOT_TIMEOUT_SECONDS)
+        if zap_available:
+            print("    [+] ZAP is ready.")
+        else:
+            print("    [!] ZAP did not become ready in time - ZAP scan phase will be skipped.")
 
         # --- Phase 1: Discovery (Nmap) ---
         print("\n[*] Phase 1: Running Discovery Scan (Nmap)...")
@@ -113,7 +116,7 @@ def main():
             raw_findings.extend(nuclei_results)
 
             # --- ZAP ---
-            if zap_process and zap_scanner.is_zap_ready(zap_api_url):
+            if zap_available:
                 zap_key = config.get('tools', {}).get('zap_api_key', '')
                 scan_spinner = Spinner(message="ZAP is actively crawling and attacking...")
                 scan_spinner.start()
