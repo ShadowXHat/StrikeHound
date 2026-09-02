@@ -68,6 +68,18 @@ python3 strikehound.py -t http://example.com -m standard
 | `-o`, `--output-dir` | Where to write the report and scan output | `./output` |
 | `--no-report` | Skip PDF generation | off |
 
+## 🧪 Testing
+
+StrikeHound has a unit test suite covering the core logic (deduplication, severity mapping, target validation, and scanner modules) using mocked tool/API responses - no live scan or external network access required to run it.
+
+```bash
+source venv/bin/activate
+pip install -r requirements-dev.txt
+python3 -m pytest tests/ -v
+```
+
+CI runs this test suite on every push, followed by a live scan against a test target as an integration smoke test.
+
 ## ⚠️ Legal Disclaimer
 
 This tool is provided for educational purposes only and for use in authorized security auditing environments.
