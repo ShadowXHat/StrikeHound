@@ -36,17 +36,6 @@ chmod +x setup.sh scan.sh
 
 You only need to run this once. To customize settings afterward (e.g. add a Slack webhook), edit `config.yaml` directly.
 
-### Alternative: Docker
-
-If you'd rather not install tools directly on your system (e.g. running on a non-Kali machine, or want isolation), a `Dockerfile` and `compose.yml` are also included:
-
-```bash
-docker compose build
-docker compose run --rm strikehound -t http://example.com -m standard
-```
-
-This is optional - the native `setup.sh` path above is recommended if you're already on Kali or a similar pentesting distro, since it uses tools you likely already have instead of duplicating them inside a container.
-
 | Key | Description |
 |---|---|
 | `tools.nmap_path` | Path to the `nmap` binary |
@@ -78,10 +67,6 @@ python3 strikehound.py -t http://example.com -m standard
 | `-m`, `--profile` | Nmap scan depth: `quick`, `standard`, `full` | `standard` |
 | `-o`, `--output-dir` | Where to write the report and scan output | `./output` |
 | `--no-report` | Skip PDF generation | off |
-
-### Docker Compose (optional)
-
-A `compose.yml` is also included if you'd rather run via Docker instead of `setup.sh` — see the Installation section above.
 
 ## ⚠️ Legal Disclaimer
 
