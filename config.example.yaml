@@ -23,4 +23,8 @@ severity_map:
     1: Medium
     0: Low
   ssh_audit:
+    critical: Critical
+    high: High
+    medium: Medium
     low: Low
+    info: Info

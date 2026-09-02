@@ -48,3 +48,9 @@ def test_run_scan_no_output_file_returns_empty(tmp_path, monkeypatch):
         mock_run.return_value = MagicMock(returncode=0)
         results = nuclei_scanner.run_scan("http://example.com", nuclei_path="nuclei")
     assert results == []
+
+
+def test_run_scan_rejects_unsafe_target(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    results = nuclei_scanner.run_scan("http://example.com; rm -rf /", nuclei_path="nuclei")
+    assert results == []
