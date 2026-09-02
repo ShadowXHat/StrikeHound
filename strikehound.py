@@ -66,15 +66,19 @@ def main():
         zap_path = config.get('tools', {}).get('zap_path', 'zap.sh')
         zap_api_url = config.get('tools', {}).get('zap_api_url', 'http://localhost:8080')
 
-        try:
-            zap_process = subprocess.Popen(
-                [zap_path, "-daemon", "-port", "8080", "-config", "api.disablekey=true"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except FileNotFoundError:
-            print(f"    [!] Could not launch ZAP at '{zap_path}' - check tools.zap_path in config.yaml.")
+        if not zap_path:
+            print("    [-] No zap_path configured - skipping ZAP entirely for this run.")
             zap_process = None
+        else:
+            try:
+                zap_process = subprocess.Popen(
+                    [zap_path, "-daemon", "-port", "8080", "-config", "api.disablekey=true"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except (FileNotFoundError, PermissionError) as e:
+                print(f"    [!] Could not launch ZAP at '{zap_path}' - check tools.zap_path in config.yaml. ({e})")
+                zap_process = None
 
         if zap_process:
             print(f"    [~] Waiting up to {ZAP_BOOT_TIMEOUT_SECONDS}s for ZAP to become ready...")
