@@ -16,6 +16,10 @@ tools:
 #   header: static auth header, e.g. Authorization: Bearer <token>. The token can
 #           also come from the STRIKEHOUND_ZAP_TOKEN env var.
 zap:
+  # Instead of driving ZAP through the REST API, write an Automation Framework
+  # plan per web target (output/zap-plans/) and print the `-cmd -autorun` command
+  # to run it. Best for complex auth; the pipeline then skips the REST scan.
+  automation: false
   ajax_spider: false
   auth:
     method: none

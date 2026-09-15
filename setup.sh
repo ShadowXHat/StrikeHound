@@ -89,6 +89,7 @@ tools:
   slack_webhook: ""
 
 zap:
+  automation: false
   ajax_spider: false
   auth:
     method: none

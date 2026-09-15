@@ -10,7 +10,7 @@ import pytest
 
 from strikehound import (
     worst_finding_severity, clean_target_for_nmap, FAIL_SEVERITY_WEIGHTS,
-    load_targets, zap_scan_config,
+    load_targets, zap_scan_config, parallel_map, zap_plan_enabled, write_zap_plan,
 )
 
 
@@ -127,3 +127,49 @@ def test_zap_scan_config_env_vars_override_config(monkeypatch):
     auth, _ = zap_scan_config(cfg)
     assert auth["username"] == "envuser"
     assert auth["password"] == "envpw"
+
+
+# --- parallel_map ---------------------------------------------------------
+
+
+def fanout(x):
+    return x * 2
+
+
+def test_parallel_map_single_job_preserves_order():
+    assert parallel_map(fanout, [1, 2, 3], jobs=1) == [2, 4, 6]
+
+
+def test_parallel_map_multi_job_preserves_order():
+    assert parallel_map(fanout, list(range(20)), jobs=5) == [x * 2 for x in range(20)]
+
+
+def test_parallel_map_empty():
+    assert parallel_map(fanout, [], jobs=4) == []
+
+
+# --- ZAP automation plans -------------------------------------------------
+
+
+def test_zap_plan_enabled_defaults_false():
+    assert zap_plan_enabled({}) is False
+    assert zap_plan_enabled({"zap": {"automation": False}}) is False
+
+
+def test_zap_plan_enabled_true():
+    assert zap_plan_enabled({"zap": {"automation": True}}) is True
+
+
+def test_write_zap_plan_writes_valid_yaml(tmp_path):
+    import yaml
+    cfg = {
+        "tools": {"zap_path": "/opt/zap/zap.sh"},
+        "zap": {"automation": True, "auth": {"method": "none"}},
+    }
+    out_dir = tmp_path / "out"
+    plan_path = write_zap_plan("http://example.com", cfg, str(out_dir))
+    assert os.path.exists(plan_path)
+    assert "zap-plans" in plan_path
+    with open(plan_path, "r", encoding="utf-8") as f:
+        plan = yaml.safe_load(f)
+    assert plan["env"]["contexts"][0]["urls"] == ["http://example.com"]

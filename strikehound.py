@@ -5,6 +5,8 @@ import yaml
 import os
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Import our modules
 from modules import slack_notifier
@@ -13,6 +15,7 @@ from modules.validators import is_safe_target
 import modules.nmap_scanner as nmap_scanner
 import modules.nuclei_scanner as nuclei_scanner
 import modules.zap_scanner as zap_scanner
+import modules.zap_plan as zap_plan
 import modules.deduplicator as deduplicator
 import modules.severity_mapper as severity_mapper
 import modules.ssh_audit as ssh_audit
@@ -121,8 +124,46 @@ def zap_scan_config(config) -> tuple:
     return auth, ajax_spider
 
 
+def zap_plan_enabled(config: dict) -> bool:
+    """Whether ZAP should be driven by an automation plan instead of the REST API."""
+    return bool((config.get('zap', {}) or {}).get('automation', False))
+
+
+def write_zap_plan(target: str, config: dict, output_dir: str) -> str:
+    """Writes a ZAP automation plan for `target` and prints how to run it."""
+    plans_dir = os.path.join(output_dir, "zap-plans")
+    os.makedirs(plans_dir, exist_ok=True)
+    plan_path = os.path.join(plans_dir, f"zap-plan-{report.safe_filename_from_target(target)}.yaml")
+
+    auth, ajax_spider = zap_scan_config(config)
+    zap_plan.build_plan(target, plan_path, auth=auth, ajax_spider=ajax_spider)
+
+    zap_path = config.get('tools', {}).get('zap_path', 'zap.sh')
+    print(f"    [+] ZAP automation plan written: {plan_path}")
+    print(f"        Run it in one-shot mode: {zap_path} -cmd -autorun {plan_path} -port 8080 -config api.disablekey=true")
+    return plan_path
+
+
+def parallel_map(fn, items, jobs: int):
+    """
+    Applies fn to each item, running at most `jobs` threads.
+    Preserves input order; degrades to a plain loop when jobs < 2.
+    """
+    items = list(items)
+    if jobs <= 1 or len(items) <= 1:
+        return [fn(x) for x in items]
+
+    results = [None] * len(items)
+    with ThreadPoolExecutor(max_workers=min(jobs, len(items))) as executor:
+        future_to_index = {executor.submit(fn, item): i for i, item in enumerate(items)}
+        for future in as_completed(future_to_index):
+            results[future_to_index[future]] = future.result()
+    return results
+
+
 def scan_target(target: str, args, config: dict, severity_map: dict,
-                zap_available: bool, zap_api_url: str, zap_key: str) -> dict:
+                zap_available: bool, zap_api_url: str, zap_key: str,
+                zap_lock: threading.Lock = None) -> dict:
     """Runs the full per-target pipeline and returns findings + report path."""
     print(f"[*] Starting StrikeHound against {target}")
 
@@ -162,22 +203,38 @@ def scan_target(target: str, args, config: dict, severity_map: dict,
         raw_findings.extend(nuclei_results)
 
         # --- ZAP ---
-        if zap_available:
+        if zap_plan_enabled(config):
+            write_zap_plan(target, config, args.output_dir)
+        elif zap_available:
             auth, ajax_spider = zap_scan_config(config)
             context_name = f"strikehound-{report.safe_filename_from_target(target)}"
-            scan_spinner = Spinner(message="ZAP is actively crawling and attacking...")
-            scan_spinner.start()
+            # The Spinner runs its own thread; keep it serial-only so parallel
+            # runs don't fight over the terminal.
+            spinner = None if args.jobs != 1 else Spinner(message="ZAP is actively crawling and attacking...")
+            if spinner:
+                spinner.start()
             try:
-                zap_results = zap_scanner.run_scan(
-                    target, zap_api_url, zap_key,
-                    auth=auth, ajax_spider=ajax_spider, context_name=context_name,
-                )
+                # A ZAP daemon can only handle a handful of active scans at
+                # once, so serialize the ZAP phase across targets.
+                if zap_lock:
+                    with zap_lock:
+                        zap_results = zap_scanner.run_scan(
+                            target, zap_api_url, zap_key,
+                            auth=auth, ajax_spider=ajax_spider, context_name=context_name,
+                        )
+                else:
+                    zap_results = zap_scanner.run_scan(
+                        target, zap_api_url, zap_key,
+                        auth=auth, ajax_spider=ajax_spider, context_name=context_name,
+                    )
                 for finding in zap_results:
                     finding['severity'] = severity_mapper.normalize('zap', finding.get('severity'), severity_map)
                 raw_findings.extend(zap_results)
-                scan_spinner.stop(success_message=f"ZAP finished successfully. Found {len(zap_results)} issues.")
+                if spinner:
+                    spinner.stop(success_message=f"ZAP finished successfully. Found {len(zap_results)} issues.")
             except Exception as e:
-                scan_spinner.stop()
+                if spinner:
+                    spinner.stop()
                 print(f"    [!] ZAP Scan failed: {e}")
         else:
             print("    [-] ZAP not available. Skipping ZAP scan.")
@@ -228,6 +285,8 @@ def main():
     parser.add_argument("-l", "--targets-file", help="File with one target per line (# comments and blank lines allowed)")
     parser.add_argument("-m", "--profile", choices=["quick", "standard", "full"], default="standard", help="Nmap scan depth (mode)")
     parser.add_argument("-o", "--output-dir", default="./output", help="Where to write results")
+    parser.add_argument("-j", "--jobs", type=int, default=1,
+                        help="Scan up to N targets in parallel (default 1). ZAP active scans stay serialized.")
     parser.add_argument("--no-report", action="store_true", help="Skip PDF generation")
     parser.add_argument("--fail-on", choices=["critical", "high", "medium", "low", "info"], default=None,
                         help="Exit with code 1 if any finding is at or above this severity. Useful as a CI gate.")
@@ -271,14 +330,25 @@ def main():
 
         print(f"[*] Loaded {len(targets)} target(s).")
         zap_key = config.get('tools', {}).get('zap_api_key', '')
+
+        # A ZAP daemon handles active scans best one at a time - serialize the
+        # ZAP phase across parallel workers with a shared lock.
+        zap_lock = threading.Lock() if args.jobs > 1 else None
+
+        def _run_one(target):
+            return scan_target(target, args, config, severity_map, zap_available,
+                               zap_api_url, zap_key, zap_lock=zap_lock)
+
+        print(f"[*] Scanning with {args.jobs} worker(s)...")
+        results = dict(zip(targets, parallel_map(_run_one, targets, args.jobs)))
+
         all_findings = []
         last_report_path = None
-
-        for i, target in enumerate(targets, 1):
-            print(f"\n=== Target {i}/{len(targets)}: {target} ===")
-            result = scan_target(target, args, config, severity_map, zap_available, zap_api_url, zap_key)
+        for target in targets:
+            result = results[target]
             all_findings.extend(result['findings'])
             last_report_path = result['report_path'] or last_report_path
+            print(f"[+] Target '{target}' done: {len(result['findings'])} finding(s).")
 
         print("\n[+] Pipeline execution complete!")
         if last_report_path:
