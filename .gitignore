@@ -17,5 +17,10 @@ output/
 *.xml
 *.jsonl
 
+# ZAP automation artifacts (also under output/, kept here for safety)
+zap-reports/
+zap-plans/
+.strikehound-done/
+
 # OS
 .DS_Store

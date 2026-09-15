@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Import our modules
@@ -16,6 +17,7 @@ import modules.nmap_scanner as nmap_scanner
 import modules.nuclei_scanner as nuclei_scanner
 import modules.zap_scanner as zap_scanner
 import modules.zap_plan as zap_plan
+import modules.zap_report_parser as zap_report_parser
 import modules.deduplicator as deduplicator
 import modules.severity_mapper as severity_mapper
 import modules.ssh_audit as ssh_audit
@@ -136,12 +138,94 @@ def write_zap_plan(target: str, config: dict, output_dir: str) -> str:
     plan_path = os.path.join(plans_dir, f"zap-plan-{report.safe_filename_from_target(target)}.yaml")
 
     auth, ajax_spider = zap_scan_config(config)
-    zap_plan.build_plan(target, plan_path, auth=auth, ajax_spider=ajax_spider)
+    zap_plan.build_plan(
+        target, plan_path, auth=auth, ajax_spider=ajax_spider,
+        report_dir=os.path.abspath(os.path.join(output_dir, "zap-reports")),
+    )
 
     zap_path = config.get('tools', {}).get('zap_path', 'zap.sh')
     print(f"    [+] ZAP automation plan written: {plan_path}")
     print(f"        Run it in one-shot mode: {zap_path} -cmd -autorun {plan_path} -port 8080 -config api.disablekey=true")
     return plan_path
+
+
+def merge_automation_results(target: str, config: dict, output_dir: str) -> list:
+    """
+    Pulls findings out of a ZAP automation-run report (output/zap-reports/)
+    if one exists for `target`. Returns [] when the plan hasn't been run yet.
+    """
+    report_dir = os.path.abspath(os.path.join(output_dir, "zap-reports"))
+    report_path = zap_report_parser.latest_report(report_dir)
+    if report_path is None:
+        print("    [-] No ZAP automation report found yet - run the plan, then re-run StrikeHound to merge results.")
+        return []
+
+    findings = []
+    expected_host = clean_target_for_nmap(target)
+    for finding in zap_report_parser.parse_zap_json_report(report_path):
+        if clean_target_for_nmap(finding.get("target", "")) == expected_host:
+            findings.append(finding)
+
+    if findings:
+        print(f"    [+] Merged {len(findings)} finding(s) from ZAP automation report ({report_path}).")
+    else:
+        print(f"    [~] ZAP automation report has no findings matching {target}.")
+    return findings
+
+
+def _marker_path(output_dir: str, target: str) -> str:
+    return os.path.join(output_dir, ".strikehound-done", f"{report.safe_filename_from_target(target)}.done")
+
+
+def target_is_complete(output_dir: str, target: str) -> bool:
+    """Whether a --resume run can skip this target (a completed-scan marker exists)."""
+    return os.path.isfile(_marker_path(output_dir, target))
+
+
+def _write_marker(output_dir: str, target: str, finding_count: int) -> str:
+    path = _marker_path(output_dir, target)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump({
+            "target": target,
+            "completed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "findings": finding_count,
+        }, f, sort_keys=False)
+    return path
+
+
+def load_policy(policy_path: str) -> dict:
+    """Loads a per-target severity policy file {host: threshold, default: threshold}."""
+    try:
+        with open(policy_path, "r", encoding="utf-8") as f:
+            policy = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        print(f"[!] Error: policy file {policy_path} not found.")
+        sys.exit(1)
+    except yaml.YAMLError as e:
+        print(f"[!] Error: {policy_path} is not valid YAML: {e}")
+        sys.exit(1)
+    if not isinstance(policy, dict):
+        print(f"[!] Error: policy file must be a YAML mapping of host -> severity threshold.")
+        sys.exit(1)
+    return {str(k).strip().lower(): v for k, v in policy.items()}
+
+
+def policy_threshold_for(target: str, policy: dict) -> str:
+    """
+    Returns the threshold severity for `target` from the policy dict.
+    Matches on exact host or parent-domain suffix; falls back to 'default',
+    then 'info' (no gate) if nothing matches.
+    """
+    host = clean_target_for_nmap(target).lower()
+    if host in policy:
+        return str(policy[host]).lower()
+    for key, value in policy.items():
+        if key == "default":
+            continue
+        if host == key or host.endswith("." + key):
+            return str(value).lower()
+    return str(policy.get("default", "info")).lower()
 
 
 def parallel_map(fn, items, jobs: int):
@@ -205,6 +289,10 @@ def scan_target(target: str, args, config: dict, severity_map: dict,
         # --- ZAP ---
         if zap_plan_enabled(config):
             write_zap_plan(target, config, args.output_dir)
+            plan_findings = merge_automation_results(target, config, args.output_dir)
+            for finding in plan_findings:
+                finding['severity'] = severity_mapper.normalize('zap', finding.get('severity'), severity_map)
+            raw_findings.extend(plan_findings)
         elif zap_available:
             auth, ajax_spider = zap_scan_config(config)
             context_name = f"strikehound-{report.safe_filename_from_target(target)}"
@@ -276,6 +364,10 @@ def scan_target(target: str, args, config: dict, severity_map: dict,
         print("\n[*] Phase 4: No findings to report. Skipping PDF generation.")
         report_path = json_path
 
+    if args.resume:
+        marker = _write_marker(args.output_dir, target, len(normalized_findings))
+        print(f"[+] Completed-scan marker written: {marker}")
+
     return {"findings": normalized_findings, "report_path": report_path}
 
 
@@ -288,8 +380,14 @@ def main():
     parser.add_argument("-j", "--jobs", type=int, default=1,
                         help="Scan up to N targets in parallel (default 1). ZAP active scans stay serialized.")
     parser.add_argument("--no-report", action="store_true", help="Skip PDF generation")
-    parser.add_argument("--fail-on", choices=["critical", "high", "medium", "low", "info"], default=None,
-                        help="Exit with code 1 if any finding is at or above this severity. Useful as a CI gate.")
+    parser.add_argument("--resume", action="store_true",
+                        help="Skip targets that already completed a scan (marker files under <output-dir>/.strikehound-done).")
+    gate = parser.add_mutually_exclusive_group()
+    gate.add_argument("--fail-on", choices=["critical", "high", "medium", "low", "info"], default=None,
+                      help="Exit with code 1 if any finding is at or above this severity across all targets. Useful as a CI gate.")
+    gate.add_argument("--policy", default=None,
+                      help="YAML file of per-target severity thresholds ({host: threshold, default: threshold}). "
+                           "Exit 1 if any target's worst finding is at/above its threshold.")
     args = parser.parse_args()
 
     targets = load_targets(args)
@@ -331,6 +429,14 @@ def main():
         print(f"[*] Loaded {len(targets)} target(s).")
         zap_key = config.get('tools', {}).get('zap_api_key', '')
 
+        if args.resume:
+            runnable = [t for t in targets if not target_is_complete(args.output_dir, t)]
+            skipped = [t for t in targets if target_is_complete(args.output_dir, t)]
+            if skipped:
+                print(f"    [-] --resume: skipping {len(skipped)} already-completed target(s): {', '.join(skipped)}")
+        else:
+            runnable, skipped = targets, []
+
         # A ZAP daemon handles active scans best one at a time - serialize the
         # ZAP phase across parallel workers with a shared lock.
         zap_lock = threading.Lock() if args.jobs > 1 else None
@@ -339,8 +445,9 @@ def main():
             return scan_target(target, args, config, severity_map, zap_available,
                                zap_api_url, zap_key, zap_lock=zap_lock)
 
-        print(f"[*] Scanning with {args.jobs} worker(s)...")
-        results = dict(zip(targets, parallel_map(_run_one, targets, args.jobs)))
+        print(f"[*] Scanning {len(runnable)} target(s) with {args.jobs} worker(s)...")
+        run_results = dict(zip(runnable, parallel_map(_run_one, runnable, args.jobs)))
+        results = {t: run_results.get(t, {"findings": [], "report_path": None}) for t in targets}
 
         all_findings = []
         last_report_path = None
@@ -354,9 +461,28 @@ def main():
         if last_report_path:
             print(f"[+] Latest report: {last_report_path}")
 
-        # --- Phase 5: CI severity gate (across all targets) ---
-        if args.fail_on:
-            worst = worst_finding_severity(all_findings)
+        # --- Phase 4.5: Cross-target deduplication for the final summary/gate ---
+        unique_findings = deduplicator.deduplicate(all_findings)
+        print(f"[+] Aggregate: {len(all_findings)} raw finding(s), {len(unique_findings)} unique across all targets.")
+
+        # --- Phase 5: CI severity gate ---
+        if args.policy:
+            policy = load_policy(args.policy)
+            failed = False
+            for target in targets:
+                threshold = policy_threshold_for(target, policy)
+                if threshold not in FAIL_SEVERITY_WEIGHTS:
+                    print(f"    [!] Policy threshold '{threshold}' for {target} is invalid - treating as 'info'.")
+                    threshold = "info"
+                worst = worst_finding_severity(results[target]['findings'])
+                if FAIL_SEVERITY_WEIGHTS.get(worst, 0) >= FAIL_SEVERITY_WEIGHTS.get(threshold, 0):
+                    print(f"[!] Policy gate triggered for {target}: worst is '{worst.upper()}' >= threshold '{threshold.upper()}'.")
+                    failed = True
+            if failed:
+                return 1
+            print("[+] Policy gate passed for all targets.")
+        elif args.fail_on:
+            worst = worst_finding_severity(unique_findings)
             threshold = FAIL_SEVERITY_WEIGHTS[args.fail_on]
             if FAIL_SEVERITY_WEIGHTS.get(worst, 0) >= threshold:
                 print(f"[!] --fail-on {args.fail_on} triggered: worst severity is '{worst.upper()}'.")

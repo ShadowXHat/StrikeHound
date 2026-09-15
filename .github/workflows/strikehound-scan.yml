@@ -6,6 +6,19 @@ on:
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
+    inputs:
+      target:
+        description: 'URL or IP to scan'
+        required: false
+        default: 'http://testphp.vulnweb.com'
+      profile:
+        description: 'Nmapped scan depth: quick | standard | full'
+        required: false
+        default: 'quick'
+      fail_on:
+        description: 'CI gate severity: critical | high | medium | low | info (blank = no gate)'
+        required: false
+        default: ''
 
 jobs:
   unit-tests:
@@ -116,8 +129,14 @@ jobs:
           mkdir -p output
 
       - name: Run StrikeHound Pipeline
+        env:
+          TARGET: ${{ inputs.target || 'http://testphp.vulnweb.com' }}
+          PROFILE: ${{ inputs.profile || 'quick' }}
+          FAIL_ON: ${{ inputs.fail_on }}
         run: |
-          python3 strikehound.py -t http://testphp.vulnweb.com -m quick
+          ARGS="-t ${TARGET} -m ${PROFILE}"
+          if [ -n "${FAIL_ON}" ]; then ARGS="${ARGS} --fail-on ${FAIL_ON}"; fi
+          python3 strikehound.py ${ARGS}
 
       - name: Upload Scan Artifacts
         uses: actions/upload-artifact@v4

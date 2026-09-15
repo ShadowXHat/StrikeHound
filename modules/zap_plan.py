@@ -17,20 +17,22 @@ AUTH_CONTEXT = "strikehound"
 AUTH_USER = "strikehound-user"
 
 
-def _report_job():
+def _report_job(report_dir: str, report_file: str):
     return {
         "type": "report",
         "parameters": {
             "template": "traditional-json",
-            "reportDir": "zap-reports",
-            "reportFile": "zap-report.json",
+            "reportDir": report_dir,
+            "reportFile": report_file,
             "display": False,
         },
     }
 
 
 def build_plan(target: str, out_path: str, auth: dict = None,
-               ajax_spider: bool = False) -> str:
+               ajax_spider: bool = False,
+               report_dir: str = "zap-reports",
+               report_file: str = "zap-report.json") -> str:
     """
     Writes a ZAP automation plan for `target` to `out_path` and returns the path.
 
@@ -40,6 +42,10 @@ def build_plan(target: str, out_path: str, auth: dict = None,
         auth: optional auth dict in the same shape strikehound.zap_scan_config
             produces ('form' or 'header' methods supported).
         ajax_spider: also include a spiderAjax (headless-browser) job.
+        report_dir: where ZAP writes the JSON report. Use an ABSOLUTE path so
+            the report lands somewhere StrikeHound can find it again regardless
+            of the working directory the plan is run from.
+        report_file: name of the JSON report file.
     """
     urls = [target]
     context = {"name": AUTH_CONTEXT, "urls": urls}
@@ -93,7 +99,7 @@ def build_plan(target: str, out_path: str, auth: dict = None,
         asc_params["user"] = scan_user
     jobs.append({"type": "activeScan", "parameters": asc_params})
 
-    jobs.append(_report_job())
+    jobs.append(_report_job(report_dir, report_file))
 
     plan = {
         "env": {

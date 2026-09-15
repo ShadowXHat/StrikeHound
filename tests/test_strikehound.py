@@ -11,6 +11,8 @@ import pytest
 from strikehound import (
     worst_finding_severity, clean_target_for_nmap, FAIL_SEVERITY_WEIGHTS,
     load_targets, zap_scan_config, parallel_map, zap_plan_enabled, write_zap_plan,
+    load_policy, policy_threshold_for, merge_automation_results,
+    _marker_path, _write_marker, target_is_complete,
 )
 
 
@@ -173,3 +175,92 @@ def test_write_zap_plan_writes_valid_yaml(tmp_path):
     with open(plan_path, "r", encoding="utf-8") as f:
         plan = yaml.safe_load(f)
     assert plan["env"]["contexts"][0]["urls"] == ["http://example.com"]
+
+
+def test_write_zap_plan_uses_absolute_report_dir(tmp_path):
+    import yaml
+    cfg = {"tools": {"zap_path": "zap.sh"}, "zap": {"automation": True}}
+    out_dir = tmp_path / "out"
+    plan_path = write_zap_plan("http://example.com", cfg, str(out_dir))
+    with open(plan_path, "r", encoding="utf-8") as f:
+        plan = yaml.safe_load(f)
+    report_params = [j for j in plan["jobs"] if j["type"] == "report"][0]["parameters"]
+    assert os.path.isabs(report_params["reportDir"])
+    assert report_params["reportDir"].endswith(os.path.join("out", "zap-reports"))
+
+
+# --- automation report merging --------------------------------------------
+
+
+def test_merge_automation_results_returns_empty_without_report(tmp_path, capsys):
+    cfg = {"zap": {"automation": True}}
+    assert merge_automation_results("http://example.com", cfg, str(tmp_path)) == []
+
+
+def test_merge_automation_results_filters_to_target(tmp_path):
+    import json
+    from modules.zap_report_parser import DEFAULT_REPORT_FILE
+    report_dir = tmp_path / "zap-reports"
+    report_dir.mkdir(parents=True)
+    payload = {
+        "site": [{
+            "@name": "https://example.com", "@host": "example.com", "@port": "443", "@ssl": "true",
+            "alerts": [{"alert": "Issue", "riskcode": "2"}],
+        }, {
+            "@name": "https://other.org", "@host": "other.org", "@port": "443", "@ssl": "true",
+            "alerts": [{"alert": "Other", "riskcode": "1"}],
+        }]
+    }
+    with open(report_dir / DEFAULT_REPORT_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+
+    # Only example.com findings come back for the example.com target.
+    findings = merge_automation_results("http://example.com", {"zap": {}}, str(tmp_path))
+    assert len(findings) == 1
+    assert findings[0]["title"] == "Issue"
+
+
+# --- resume markers -------------------------------------------------------
+
+
+def test_marker_round_trip(tmp_path):
+    target = "http://example.com"
+    assert target_is_complete(str(tmp_path), target) is False
+    path = _write_marker(str(tmp_path), target, 42)
+    assert os.path.exists(path)
+    assert target_is_complete(str(tmp_path), target) is True
+    with open(path, "r", encoding="utf-8") as f:
+        import yaml
+        data = yaml.safe_load(f)
+    assert data["findings"] == 42
+    assert data["target"] == target
+
+
+def test_marker_path_is_target_specific(tmp_path):
+    assert _marker_path(str(tmp_path), "http://a.example.com") != _marker_path(str(tmp_path), "http://b.example.com")
+
+
+# --- per-target policies ---------------------------------------------------
+
+
+def test_policy_threshold_for_exact_and_suffix():
+    policy = {"default": "info", "example.com": "high", "prod.example.net": "critical"}
+    assert policy_threshold_for("http://example.com", policy) == "high"
+    assert policy_threshold_for("https://app.example.com", policy) == "high"  # suffix match
+    assert policy_threshold_for("prod.example.net", policy) == "critical"
+    assert policy_threshold_for("unknown.org", policy) == "info"  # default
+
+
+def test_policy_threshold_for_no_default_returns_info():
+    assert policy_threshold_for("whatever.com", {"other.com": "low"}) == "info"
+
+
+def test_load_policy_validates_shape(tmp_path):
+    f = tmp_path / "p.yaml"
+    f.write_text("example.com: high\ndefault: medium\n")
+    assert load_policy(str(f)) == {"example.com": "high", "default": "medium"}
+
+
+def test_load_policy_missing_file_exits(tmp_path):
+    with pytest.raises(SystemExit):
+        load_policy(str(tmp_path / "nope.yaml"))
