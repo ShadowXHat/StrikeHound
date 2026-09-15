@@ -53,9 +53,179 @@ def worst_finding_severity(findings) -> str:
     return worst
 
 
+def load_targets(args) -> list:
+    """Collects targets from -t and/or -l, validates them, and returns a deduped list."""
+    targets = []
+    if args.target:
+        targets.append(args.target)
+    if args.targets_file:
+        try:
+            with open(args.targets_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        targets.append(line)
+        except FileNotFoundError:
+            print(f"[!] Error: targets file {args.targets_file} not found.")
+            sys.exit(1)
+
+    if not targets:
+        print("[!] Error: provide a target with -t, or a list of targets with -l/--targets-file.")
+        sys.exit(1)
+
+    seen, cleaned = set(), []
+    for target in targets:
+        if target in seen:
+            continue
+        seen.add(target)
+        if not is_safe_target(target):
+            print(f"[!] Error: '{target}' doesn't look like a valid target (hostname, IP, or URL).")
+            print("    Refusing to pass it to downstream tools.")
+            sys.exit(1)
+        cleaned.append(target)
+    return cleaned
+
+
+def zap_scan_config(config) -> tuple:
+    """
+    Builds the (auth, ajax_spider) arguments for zap_scanner.run_scan from the
+    `zap:` config block. Secrets can live in the config OR in environment
+    variables (STRIKEHOUND_ZAP_USERNAME / STRIKEHOUND_ZAP_PASSWORD /
+    STRIKEHOUND_ZAP_TOKEN); env vars take precedence so CI can supply them.
+    """
+    zap_cfg = config.get('zap', {}) or {}
+    ajax_spider = bool(zap_cfg.get('ajax_spider', False))
+    auth = None
+    auth_cfg = zap_cfg.get('auth', {}) or {}
+    method = str(auth_cfg.get('method', 'none')).strip().lower()
+
+    if method == 'form':
+        auth = {
+            'method': 'form',
+            'login_url': auth_cfg.get('login_url', ''),
+            'username_field': auth_cfg.get('username_field', 'username'),
+            'password_field': auth_cfg.get('password_field', 'password'),
+            'username': os.environ.get('STRIKEHOUND_ZAP_USERNAME') or auth_cfg.get('username', ''),
+            'password': os.environ.get('STRIKEHOUND_ZAP_PASSWORD') or auth_cfg.get('password', ''),
+            'login_request_data': auth_cfg.get('login_request_data', ''),
+        }
+    elif method == 'header':
+        auth = {
+            'method': 'header',
+            'header_name': auth_cfg.get('header_name', 'Authorization'),
+            'header_value': os.environ.get('STRIKEHOUND_ZAP_TOKEN') or auth_cfg.get('header_value', ''),
+        }
+    elif method != 'none':
+        print(f"    [!] Unknown zap.auth.method '{method}' in config - ignoring auth config.")
+
+    return auth, ajax_spider
+
+
+def scan_target(target: str, args, config: dict, severity_map: dict,
+                zap_available: bool, zap_api_url: str, zap_key: str) -> dict:
+    """Runs the full per-target pipeline and returns findings + report path."""
+    print(f"[*] Starting StrikeHound against {target}")
+
+    # --- Phase 1: Discovery (Nmap) ---
+    print("\n[*] Phase 1: Running Discovery Scan (Nmap)...")
+    nmap_target = clean_target_for_nmap(target)
+    nmap_flags = config.get('scan_profiles', {}).get(args.profile, '-sV -sC -T4')
+    open_ports_dict = nmap_scanner.run_scan(nmap_target, nmap_flags, args.output_dir)
+    open_ports = list(open_ports_dict.keys())
+
+    # If Nmap fails or finds nothing, still try web scanners if a URL was given
+    if not open_ports and target.startswith(("http://", "https://")):
+        open_ports = [80, 443]
+
+    # --- Phase 2: Intelligent Orchestration ---
+    print("\n[*] Phase 2: Orchestrating Downstream Scanners...")
+    raw_findings = []
+
+    if 80 in open_ports or 443 in open_ports or target.startswith(("http://", "https://")):
+        print("    [+] Web ports detected. Triggering Nuclei and ZAP...")
+
+        # --- Nuclei ---
+        nuclei_path = config.get('tools', {}).get('nuclei_path', 'nuclei')
+        nuclei_cfg = config.get('nuclei', {}) or {}
+        nuclei_results = nuclei_scanner.run_scan(
+            target, nuclei_path, output_dir=args.output_dir,
+            rate_limit=nuclei_cfg.get('rate_limit', nuclei_scanner.DEFAULT_RATE_LIMIT),
+            concurrency=nuclei_cfg.get('concurrency', nuclei_scanner.DEFAULT_CONCURRENCY),
+            bulk_size=nuclei_cfg.get('bulk_size', nuclei_scanner.DEFAULT_BULK_SIZE),
+            timeout=nuclei_cfg.get('timeout', nuclei_scanner.DEFAULT_TIMEOUT),
+            retries=nuclei_cfg.get('retries', nuclei_scanner.DEFAULT_RETRIES),
+            tags=nuclei_cfg.get('tags', ''),
+            severity=nuclei_cfg.get('severity', ''),
+        )
+        for finding in nuclei_results:
+            finding['severity'] = severity_mapper.normalize('nuclei', finding.get('severity'), severity_map)
+        raw_findings.extend(nuclei_results)
+
+        # --- ZAP ---
+        if zap_available:
+            auth, ajax_spider = zap_scan_config(config)
+            context_name = f"strikehound-{report.safe_filename_from_target(target)}"
+            scan_spinner = Spinner(message="ZAP is actively crawling and attacking...")
+            scan_spinner.start()
+            try:
+                zap_results = zap_scanner.run_scan(
+                    target, zap_api_url, zap_key,
+                    auth=auth, ajax_spider=ajax_spider, context_name=context_name,
+                )
+                for finding in zap_results:
+                    finding['severity'] = severity_mapper.normalize('zap', finding.get('severity'), severity_map)
+                raw_findings.extend(zap_results)
+                scan_spinner.stop(success_message=f"ZAP finished successfully. Found {len(zap_results)} issues.")
+            except Exception as e:
+                scan_spinner.stop()
+                print(f"    [!] ZAP Scan failed: {e}")
+        else:
+            print("    [-] ZAP not available. Skipping ZAP scan.")
+    else:
+        print("    [-] No web ports detected. Skipping web vulnerability scanners.")
+
+    # --- Phase 2.5: SSH Auditing ---
+    if 22 in open_ports:
+        print("    [+] SSH port detected (22). Triggering SSH Audit...")
+        ssh_results = ssh_audit.run_scan(nmap_target)
+        for finding in ssh_results:
+            finding['severity'] = severity_mapper.normalize('ssh_audit', finding.get('severity'), severity_map)
+        raw_findings.extend(ssh_results)
+
+    # --- Phase 3: Data Normalization & Cleanup ---
+    print("\n[*] Phase 3: Deduplicating and Normalizing Findings...")
+    normalized_findings = deduplicator.deduplicate(raw_findings)
+
+    # --- Phase 3.5: Machine-readable output (always emitted) ---
+    base = os.path.join(args.output_dir, f"StrikeHound_Report_{report.safe_filename_from_target(target)}")
+    sarif_path = f"{base}.sarif"
+    json_path = f"{base}.json"
+    report.generate_sarif(normalized_findings, target, sarif_path)
+    report.generate_json(normalized_findings, target, json_path)
+    print(f"[+] SARIF written: {sarif_path}")
+    print(f"[+] JSON written: {json_path}")
+
+    # --- Phase 4: Report Generation ---
+    report_path = None
+    if args.no_report:
+        print("\n[*] Phase 4: Skipping PDF generation (--no-report).")
+    elif normalized_findings:
+        print("\n[*] Phase 4: Generating PDF Report...")
+        report_path = report.generate_report(normalized_findings, target, args.output_dir, open_ports)
+
+        slack_url = config.get('tools', {}).get('slack_webhook')
+        slack_notifier.send_alert(slack_url, target, len(normalized_findings), report_path)
+    else:
+        print("\n[*] Phase 4: No findings to report. Skipping PDF generation.")
+        report_path = json_path
+
+    return {"findings": normalized_findings, "report_path": report_path}
+
+
 def main():
     parser = argparse.ArgumentParser(description="StrikeHound: Automated Security Scanning & Reporting Framework")
-    parser.add_argument("-t", "--target", required=True, help="Target IP or URL to scan")
+    parser.add_argument("-t", "--target", help="Target IP or URL to scan (or use -l/--targets-file for many)")
+    parser.add_argument("-l", "--targets-file", help="File with one target per line (# comments and blank lines allowed)")
     parser.add_argument("-m", "--profile", choices=["quick", "standard", "full"], default="standard", help="Nmap scan depth (mode)")
     parser.add_argument("-o", "--output-dir", default="./output", help="Where to write results")
     parser.add_argument("--no-report", action="store_true", help="Skip PDF generation")
@@ -63,20 +233,14 @@ def main():
                         help="Exit with code 1 if any finding is at or above this severity. Useful as a CI gate.")
     args = parser.parse_args()
 
-    if not is_safe_target(args.target):
-        print(f"[!] Error: '{args.target}' doesn't look like a valid target (hostname, IP, or URL).")
-        print("    Refusing to pass it to downstream tools.")
-        sys.exit(1)
-
+    targets = load_targets(args)
     os.makedirs(args.output_dir, exist_ok=True)
     config = load_config()
     severity_map = config.get('severity_map', {})
 
-    print(f"[*] Starting StrikeHound against {args.target}")
-
     zap_process = None
     try:
-        # --- Phase 0: Boot ZAP daemon in the background ---
+        # --- Phase 0: Boot ZAP daemon in the background (once for all targets) ---
         print("    [+] Booting background scanning engines...")
         zap_path = config.get('tools', {}).get('zap_path', 'zap.sh')
         zap_api_url = config.get('tools', {}).get('zap_api_url', 'http://localhost:8080')
@@ -105,100 +269,24 @@ def main():
         else:
             print("    [!] ZAP did not become ready in time - ZAP scan phase will be skipped.")
 
-        # --- Phase 1: Discovery (Nmap) ---
-        print("\n[*] Phase 1: Running Discovery Scan (Nmap)...")
-        nmap_target = clean_target_for_nmap(args.target)
-        nmap_flags = config.get('scan_profiles', {}).get(args.profile, '-sV -sC -T4')
-        open_ports_dict = nmap_scanner.run_scan(nmap_target, nmap_flags, args.output_dir)
-        open_ports = list(open_ports_dict.keys())
+        print(f"[*] Loaded {len(targets)} target(s).")
+        zap_key = config.get('tools', {}).get('zap_api_key', '')
+        all_findings = []
+        last_report_path = None
 
-        # If Nmap fails or finds nothing, still try web scanners if a URL was given
-        if not open_ports and args.target.startswith(("http://", "https://")):
-            open_ports = [80, 443]
-
-        # --- Phase 2: Intelligent Orchestration ---
-        print("\n[*] Phase 2: Orchestrating Downstream Scanners...")
-        raw_findings = []
-
-        if 80 in open_ports or 443 in open_ports or args.target.startswith(("http://", "https://")):
-            print("    [+] Web ports detected. Triggering Nuclei and ZAP...")
-
-            # --- Nuclei ---
-            nuclei_path = config.get('tools', {}).get('nuclei_path', 'nuclei')
-            nuclei_cfg = config.get('nuclei', {}) or {}
-            nuclei_results = nuclei_scanner.run_scan(
-                args.target, nuclei_path, output_dir=args.output_dir,
-                rate_limit=nuclei_cfg.get('rate_limit', nuclei_scanner.DEFAULT_RATE_LIMIT),
-                concurrency=nuclei_cfg.get('concurrency', nuclei_scanner.DEFAULT_CONCURRENCY),
-                bulk_size=nuclei_cfg.get('bulk_size', nuclei_scanner.DEFAULT_BULK_SIZE),
-                timeout=nuclei_cfg.get('timeout', nuclei_scanner.DEFAULT_TIMEOUT),
-                retries=nuclei_cfg.get('retries', nuclei_scanner.DEFAULT_RETRIES),
-                tags=nuclei_cfg.get('tags', ''),
-                severity=nuclei_cfg.get('severity', ''),
-            )
-            for finding in nuclei_results:
-                finding['severity'] = severity_mapper.normalize('nuclei', finding.get('severity'), severity_map)
-            raw_findings.extend(nuclei_results)
-
-            # --- ZAP ---
-            if zap_available:
-                zap_key = config.get('tools', {}).get('zap_api_key', '')
-                scan_spinner = Spinner(message="ZAP is actively crawling and attacking...")
-                scan_spinner.start()
-                try:
-                    zap_results = zap_scanner.run_scan(args.target, zap_api_url, zap_key)
-                    for finding in zap_results:
-                        finding['severity'] = severity_mapper.normalize('zap', finding.get('severity'), severity_map)
-                    raw_findings.extend(zap_results)
-                    scan_spinner.stop(success_message=f"ZAP finished successfully. Found {len(zap_results)} issues.")
-                except Exception as e:
-                    scan_spinner.stop()
-                    print(f"    [!] ZAP Scan failed: {e}")
-            else:
-                print("    [-] ZAP not available. Skipping ZAP scan.")
-        else:
-            print("    [-] No web ports detected. Skipping web vulnerability scanners.")
-
-        # --- Phase 2.5: SSH Auditing ---
-        if 22 in open_ports:
-            print("    [+] SSH port detected (22). Triggering SSH Audit...")
-            ssh_results = ssh_audit.run_scan(nmap_target)
-            for finding in ssh_results:
-                finding['severity'] = severity_mapper.normalize('ssh_audit', finding.get('severity'), severity_map)
-            raw_findings.extend(ssh_results)
-
-        # --- Phase 3: Data Normalization & Cleanup ---
-        print("\n[*] Phase 3: Deduplicating and Normalizing Findings...")
-        normalized_findings = deduplicator.deduplicate(raw_findings)
-
-        # --- Phase 3.5: Machine-readable output (always emitted) ---
-        base = os.path.join(args.output_dir, f"StrikeHound_Report_{report.safe_filename_from_target(args.target)}")
-        sarif_path = f"{base}.sarif"
-        json_path = f"{base}.json"
-        report.generate_sarif(normalized_findings, args.target, sarif_path)
-        report.generate_json(normalized_findings, args.target, json_path)
-        print(f"[+] SARIF written: {sarif_path}")
-        print(f"[+] JSON written: {json_path}")
-
-        # --- Phase 4: Report Generation ---
-        report_path = None
-        if args.no_report:
-            print("\n[*] Phase 4: Skipping PDF generation (--no-report).")
-        elif normalized_findings:
-            print("\n[*] Phase 4: Generating PDF Report...")
-            report_path = report.generate_report(normalized_findings, args.target, args.output_dir, open_ports)
-
-            slack_url = config.get('tools', {}).get('slack_webhook')
-            slack_notifier.send_alert(slack_url, args.target, len(normalized_findings), report_path)
-        else:
-            print("\n[*] Phase 4: No findings to report. Skipping PDF generation.")
-            report_path = json_path
+        for i, target in enumerate(targets, 1):
+            print(f"\n=== Target {i}/{len(targets)}: {target} ===")
+            result = scan_target(target, args, config, severity_map, zap_available, zap_api_url, zap_key)
+            all_findings.extend(result['findings'])
+            last_report_path = result['report_path'] or last_report_path
 
         print("\n[+] Pipeline execution complete!")
+        if last_report_path:
+            print(f"[+] Latest report: {last_report_path}")
 
-        # --- Phase 5: CI severity gate ---
+        # --- Phase 5: CI severity gate (across all targets) ---
         if args.fail_on:
-            worst = worst_finding_severity(normalized_findings)
+            worst = worst_finding_severity(all_findings)
             threshold = FAIL_SEVERITY_WEIGHTS[args.fail_on]
             if FAIL_SEVERITY_WEIGHTS.get(worst, 0) >= threshold:
                 print(f"[!] --fail-on {args.fail_on} triggered: worst severity is '{worst.upper()}'.")

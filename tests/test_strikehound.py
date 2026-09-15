@@ -5,7 +5,13 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from strikehound import worst_finding_severity, clean_target_for_nmap, FAIL_SEVERITY_WEIGHTS
+from argparse import Namespace
+import pytest
+
+from strikehound import (
+    worst_finding_severity, clean_target_for_nmap, FAIL_SEVERITY_WEIGHTS,
+    load_targets, zap_scan_config,
+)
 
 
 def test_clean_target_for_nmap_strips_scheme():
@@ -40,3 +46,84 @@ def test_fail_severity_thresholds_ordered():
     assert FAIL_SEVERITY_WEIGHTS["high"] > FAIL_SEVERITY_WEIGHTS["medium"]
     assert FAIL_SEVERITY_WEIGHTS["medium"] > FAIL_SEVERITY_WEIGHTS["low"]
     assert FAIL_SEVERITY_WEIGHTS["low"] > FAIL_SEVERITY_WEIGHTS["info"]
+
+
+def _args(target=None, targets_file=None):
+    return Namespace(target=target, targets_file=targets_file)
+
+
+# --- load_targets ---------------------------------------------------------
+
+
+def test_load_targets_from_single_target():
+    assert load_targets(_args(target="http://example.com")) == ["http://example.com"]
+
+
+def test_load_targets_from_file_skips_comments_and_dedupes(tmp_path):
+    f = tmp_path / "targets.txt"
+    f.write_text("# comment line\n\nexample.com\n192.168.1.1\nexample.com\n")
+    assert load_targets(_args(targets_file=str(f))) == ["example.com", "192.168.1.1"]
+
+
+def test_load_targets_merges_target_and_file(tmp_path):
+    f = tmp_path / "targets.txt"
+    f.write_text("example.org\n")
+    assert load_targets(_args(target="example.com", targets_file=str(f))) == ["example.com", "example.org"]
+
+
+def test_load_targets_missing_file_exits(tmp_path):
+    with pytest.raises(SystemExit):
+        load_targets(_args(targets_file=str(tmp_path / "nope.txt")))
+
+
+def test_load_targets_requires_at_least_one_target():
+    with pytest.raises(SystemExit):
+        load_targets(_args())
+
+
+# --- zap_scan_config ------------------------------------------------------
+
+
+def test_zap_scan_config_defaults_to_no_auth():
+    assert zap_scan_config({"zap": {}}) == (None, False)
+    assert zap_scan_config({}) == (None, False)
+
+
+def test_zap_scan_config_form_auth():
+    cfg = {
+        "zap": {
+            "ajax_spider": True,
+            "auth": {
+                "method": "form",
+                "login_url": "http://x/login",
+                "username_field": "user",
+                "password_field": "pass",
+                "username": "bob",
+                "password": "pw",
+            },
+        }
+    }
+    auth, ajax = zap_scan_config(cfg)
+    assert ajax is True
+    assert auth["method"] == "form"
+    assert auth["login_url"] == "http://x/login"
+    assert auth["username"] == "bob"
+    assert auth["password"] == "pw"
+
+
+def test_zap_scan_config_header_auth():
+    cfg = {"zap": {"auth": {"method": "header", "header_name": "X-Api-Key", "header_value": "abc"}}}
+    auth, ajax = zap_scan_config(cfg)
+    assert auth["method"] == "header"
+    assert auth["header_name"] == "X-Api-Key"
+    assert auth["header_value"] == "abc"
+    assert ajax is False
+
+
+def test_zap_scan_config_env_vars_override_config(monkeypatch):
+    cfg = {"zap": {"auth": {"method": "form", "username": "configuser", "password": "configpw"}}}
+    monkeypatch.setenv("STRIKEHOUND_ZAP_USERNAME", "envuser")
+    monkeypatch.setenv("STRIKEHOUND_ZAP_PASSWORD", "envpw")
+    auth, _ = zap_scan_config(cfg)
+    assert auth["username"] == "envuser"
+    assert auth["password"] == "envpw"

@@ -88,6 +88,19 @@ tools:
   zap_api_key: ""
   slack_webhook: ""
 
+zap:
+  ajax_spider: false
+  auth:
+    method: none
+    login_url: ""
+    username_field: "username"
+    password_field: "password"
+    username: ""
+    password: ""
+    login_request_data: ""
+    header_name: "Authorization"
+    header_value: ""
+
 nuclei:
   rate_limit: 50
   concurrency: 25

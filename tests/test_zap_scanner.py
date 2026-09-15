@@ -13,7 +13,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from unittest.mock import patch, MagicMock
 import pytest
 
-from modules.zap_scanner import run_scan, is_zap_ready, wait_for_zap, ZapScanError, _poll_scan_status
+from modules.zap_scanner import (
+    run_scan, is_zap_ready, wait_for_zap, ZapScanError,
+    _poll_scan_status, _poll_run_status, _new_context,
+)
 
 
 def _mock_response(json_data, status_code=200):
@@ -167,3 +170,190 @@ def test_run_scan_full_happy_path():
     assert len(result) == 1
     assert result[0]["title"] == "Missing Header"
     assert result[0]["severity"] == 1
+
+
+# --- Authenticated + scoped scanning -------------------------------------
+
+
+def test_run_scan_with_form_auth_configures_context_and_user():
+    """Form auth must create a context, wire up the login, and pass the
+    context user into the active scan."""
+    responses_by_call = {
+        "/JSON/context/action/newContext/": {"contextId": "5"},
+        "/JSON/context/action/includeInContext/": {},
+        "/JSON/sessionManagement/action/setSessionManagementMethod/": {},
+        "/JSON/authentication/action/setAuthenticationMethod/": {},
+        "/JSON/authentication/action/addUser/": {"userId": "12"},
+        "/JSON/authentication/action/setUserCredentials/": {},
+        "/JSON/spider/action/scan/": {"scan": "1"},
+        "/JSON/spider/view/status/": {"status": "100"},
+        "/JSON/ascan/action/scan/": {"scan": "2"},
+        "/JSON/ascan/view/status/": {"status": "100"},
+        "/JSON/core/view/alerts/": {"alerts": [
+            {"name": "SQLi", "riskCode": "2", "description": "d", "solution": "use params"}
+        ]},
+    }
+    calls = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls.append((url, params))
+        for path, body in responses_by_call.items():
+            if url.endswith(path):
+                return _mock_response(body)
+        raise AssertionError(f"Unexpected URL called: {url}")
+
+    auth = {
+        "method": "form",
+        "login_url": "http://example.com/login",
+        "username_field": "user",
+        "password_field": "pass",
+        "username": "alice",
+        "password": "s3cret",
+    }
+    with patch("modules.zap_scanner.is_zap_ready", return_value=True), \
+         patch("modules.zap_scanner.requests.get", side_effect=fake_get), \
+         patch("modules.zap_scanner.SPIDER_POLL_INTERVAL", 0), \
+         patch("modules.zap_scanner.ASCAN_POLL_INTERVAL", 0):
+        result = run_scan("http://example.com", api_url="http://localhost:8080", auth=auth)
+
+    assert len(result) == 1
+
+    ascan_calls = [p for u, p in calls if u.endswith("/JSON/ascan/action/scan/")]
+    assert len(ascan_calls) == 1
+    assert ascan_calls[0]["contextId"] == 5
+    assert str(ascan_calls[0]["user"]).startswith("sh-user-")
+
+    cred_calls = [p for u, p in calls if u.endswith("/JSON/authentication/action/setUserCredentials/")]
+    assert len(cred_calls) == 1
+    assert "username=alice" in cred_calls[0]["credentials"]
+    assert "password=s3cret" in cred_calls[0]["credentials"]
+
+
+def test_run_scan_header_auth_uses_context_without_user():
+    """Header auth needs no ZAP user; it still scopes the scan to a context."""
+    responses_by_call = {
+        "/JSON/context/action/newContext/": {"contextId": "3"},
+        "/JSON/context/action/includeInContext/": {},
+        "/JSON/authentication/action/setAuthenticationMethod/": {},
+        "/JSON/spider/action/scan/": {"scan": "1"},
+        "/JSON/spider/view/status/": {"status": "100"},
+        "/JSON/ascan/action/scan/": {"scan": "2"},
+        "/JSON/ascan/view/status/": {"status": "100"},
+        "/JSON/core/view/alerts/": {"alerts": []},
+    }
+    calls = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls.append((url, params))
+        for path, body in responses_by_call.items():
+            if url.endswith(path):
+                return _mock_response(body)
+        raise AssertionError(f"Unexpected URL called: {url}")
+
+    auth = {"method": "header", "header_name": "Authorization", "header_value": "Bearer tok"}
+    with patch("modules.zap_scanner.is_zap_ready", return_value=True), \
+         patch("modules.zap_scanner.requests.get", side_effect=fake_get), \
+         patch("modules.zap_scanner.SPIDER_POLL_INTERVAL", 0), \
+         patch("modules.zap_scanner.ASCAN_POLL_INTERVAL", 0):
+        result = run_scan("http://example.com", api_url="http://localhost:8080", auth=auth)
+
+    assert result == []
+
+    ascan_calls = [p for u, p in calls if u.endswith("/JSON/ascan/action/scan/")]
+    assert len(ascan_calls) == 1
+    assert ascan_calls[0]["contextId"] == 3
+    assert "user" not in ascan_calls[0]
+
+    am_calls = [p for u, p in calls if u.endswith("/JSON/authentication/action/setAuthenticationMethod/")]
+    assert len(am_calls) == 1
+    assert am_calls[0]["authMethodName"] == "httpHeaderAuthentication"
+
+
+def test_run_scan_form_auth_degrades_when_context_api_fails():
+    """If ZAP refuses to create a context, the scan must still run
+    unauthenticated rather than dying - just without authed findings."""
+    responses_by_call = {
+        "/JSON/spider/action/scan/": {"scan": "1"},
+        "/JSON/spider/view/status/": {"status": "100"},
+        "/JSON/ascan/action/scan/": {"scan": "2"},
+        "/JSON/ascan/view/status/": {"status": "100"},
+        "/JSON/core/view/alerts/": {"alerts": [
+            {"name": "Old Finding", "riskCode": "1", "description": "d", "solution": "s"}
+        ]},
+    }
+    calls = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls.append((url, params))
+        for path, body in responses_by_call.items():
+            if url.endswith(path):
+                return _mock_response(body)
+        raise AssertionError(f"Unexpected URL called: {url}")
+
+    auth = {"method": "form", "login_url": "http://example.com/login",
+            "username": "alice", "password": "s3cret"}
+    with patch("modules.zap_scanner.is_zap_ready", return_value=True), \
+         patch("modules.zap_scanner.requests.get", side_effect=fake_get), \
+         patch("modules.zap_scanner.SPIDER_POLL_INTERVAL", 0), \
+         patch("modules.zap_scanner.ASCAN_POLL_INTERVAL", 0):
+        result = run_scan("http://example.com", api_url="http://localhost:8080", auth=auth)
+
+    # newContext gets no contextId -> ZapScanError -> authenticated parts skipped.
+    urls_hit = [u for u, _ in calls]
+    assert any(u.endswith("/JSON/context/action/newContext/") for u in urls_hit)
+    assert not any("/JSON/authentication" in u for u in urls_hit)
+    assert not any("/JSON/sessionManagement" in u for u in urls_hit)
+    # The unauthenticated scan still completes and finds the old issue.
+    assert len(result) == 1
+    assert result[0]["title"] == "Old Finding"
+
+
+def test_run_scan_with_ajax_spider_runs_ajax_phase():
+    """ajax_spider=True must add an ajaxSpider crawl between spider and ascan."""
+    responses_by_call = {
+        "/JSON/spider/action/scan/": {"scan": "1"},
+        "/JSON/spider/view/status/": {"status": "100"},
+        "/JSON/ajaxSpider/action/scan/": {},
+        "/JSON/ajaxSpider/view/status/": {"status": "100"},
+        "/JSON/ascan/action/scan/": {"scan": "2"},
+        "/JSON/ascan/view/status/": {"status": "100"},
+        "/JSON/core/view/alerts/": {"alerts": []},
+    }
+    calls = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls.append((url, params))
+        for path, body in responses_by_call.items():
+            if url.endswith(path):
+                return _mock_response(body)
+        raise AssertionError(f"Unexpected URL called: {url}")
+
+    with patch("modules.zap_scanner.is_zap_ready", return_value=True), \
+         patch("modules.zap_scanner.requests.get", side_effect=fake_get), \
+         patch("modules.zap_scanner.SPIDER_POLL_INTERVAL", 0), \
+         patch("modules.zap_scanner.ASCAN_POLL_INTERVAL", 0), \
+         patch("modules.zap_scanner.AJAX_POLL_INTERVAL", 0):
+        result = run_scan("http://example.com", api_url="http://localhost:8080", ajax_spider=True)
+
+    assert result == []
+    urls_hit = [u for u, _ in calls]
+    assert any(u.endswith("/JSON/ajaxSpider/action/scan/") for u in urls_hit)
+    assert any(u.endswith("/JSON/ajaxSpider/view/status/") for u in urls_hit)
+
+
+def test_poll_run_status_raises_on_error_response():
+    """The ajaxSpider poller must not treat API errors as completion."""
+    with patch("modules.zap_scanner.requests.get",
+               return_value=_mock_response({"code": "does_not_exist"})):
+        with pytest.raises(ZapScanError):
+            _poll_run_status(
+                "http://localhost:8080/JSON/ajaxSpider/view/status/",
+                {}, {}, label="ZAP Ajax Spider", poll_interval=0, max_wait=5,
+            )
+
+
+def test_new_context_raises_when_no_context_id():
+    with patch("modules.zap_scanner.requests.get",
+               return_value=_mock_response({"code": "some_error"})):
+        with pytest.raises(ZapScanError):
+            _new_context("http://localhost:8080", {}, {}, "ctx-name")

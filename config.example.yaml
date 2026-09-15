@@ -6,6 +6,28 @@ tools:
   zap_api_key: your_zap_api_key
   slack_webhook: YOUR_WEBHOOK_URL
 
+# ZAP-specific options.
+# ajax_spider: also run ZAP's headless-browser crawler (helps find SPAs/auth'd pages).
+# auth.method: "none" (default), "form", or "header".
+#   form:   HTML login form. login_url is required; username/password are read
+#           from config OR env vars STRIKEHOUND_ZAP_USERNAME / STRIKEHOUND_ZAP_PASSWORD
+#           (env vars win - recommended for CI). login_request_data is optional and
+#           defaults to "<username_field>={%username%}&<password_field>={%password%}".
+#   header: static auth header, e.g. Authorization: Bearer <token>. The token can
+#           also come from the STRIKEHOUND_ZAP_TOKEN env var.
+zap:
+  ajax_spider: false
+  auth:
+    method: none
+    login_url: ""
+    username_field: "username"
+    password_field: "password"
+    username: ""
+    password: ""
+    login_request_data: ""
+    header_name: "Authorization"
+    header_value: ""
+
 # Forwarded to Nuclei to keep scans production-friendly and low-noise.
 # rate_limit: max requests/sec (Nuclei defaults to 150 - too aggressive for
 #             most production targets/WAFs). 30-50 is a safe starting point.
