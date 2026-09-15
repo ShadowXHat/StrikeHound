@@ -185,7 +185,7 @@ def test_run_scan_with_form_auth_configures_context_and_user():
         "/JSON/authentication/action/setAuthenticationMethod/": {},
         "/JSON/authentication/action/addUser/": {"userId": "12"},
         "/JSON/authentication/action/setUserCredentials/": {},
-        "/JSON/spider/action/scan/": {"scan": "1"},
+        "/JSON/spider/action/scanAsUser/": {"scan": "1"},
         "/JSON/spider/view/status/": {"status": "100"},
         "/JSON/ascan/action/scan/": {"scan": "2"},
         "/JSON/ascan/view/status/": {"status": "100"},
@@ -221,7 +221,16 @@ def test_run_scan_with_form_auth_configures_context_and_user():
     ascan_calls = [p for u, p in calls if u.endswith("/JSON/ascan/action/scan/")]
     assert len(ascan_calls) == 1
     assert ascan_calls[0]["contextId"] == 5
-    assert str(ascan_calls[0]["user"]).startswith("sh-user-")
+    # ZAP's ascan/scan `user` param is the numeric userId, not a username.
+    assert ascan_calls[0]["user"] == 12
+
+    # Authenticated crawling must go through spider/action/scanAsUser, and the
+    # plain spider must NOT run (it cannot authenticate).
+    spider_as_user = [p for u, p in calls if u.endswith("/JSON/spider/action/scanAsUser/")]
+    assert len(spider_as_user) == 1
+    assert spider_as_user[0]["contextId"] == 5
+    assert spider_as_user[0]["userId"] == 12
+    assert not any(u.endswith("/JSON/spider/action/scan/") for u, _ in calls)
 
     cred_calls = [p for u, p in calls if u.endswith("/JSON/authentication/action/setUserCredentials/")]
     assert len(cred_calls) == 1
@@ -263,6 +272,12 @@ def test_run_scan_header_auth_uses_context_without_user():
     assert len(ascan_calls) == 1
     assert ascan_calls[0]["contextId"] == 3
     assert "user" not in ascan_calls[0]
+
+    # Header auth has no user: the plain (context-scoped) spider runs.
+    spider_calls = [(u, p) for u, p in calls if u.endswith("/JSON/spider/action/scan/")]
+    assert len(spider_calls) == 1
+    assert "contextName" in spider_calls[0][1]
+    assert not any(u.endswith("/JSON/spider/action/scanAsUser/") for u, _ in calls)
 
     am_calls = [p for u, p in calls if u.endswith("/JSON/authentication/action/setAuthenticationMethod/")]
     assert len(am_calls) == 1

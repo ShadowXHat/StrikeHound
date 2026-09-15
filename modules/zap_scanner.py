@@ -134,8 +134,12 @@ def _include_target_in_context(target: str, api_url: str, base_params: dict,
 
 
 def _setup_form_auth(auth: dict, context_id: int, api_url: str,
-                     base_params: dict, headers: dict, user_name: str) -> str:
-    """Configures form-based authentication and creates the scan user."""
+                     base_params: dict, headers: dict, user_name: str) -> int:
+    """
+    Configures form-based authentication and creates the scan user.
+    Returns the numeric ZAP userId (what spider/scanAsUser and ascan/scan
+    expect as the `user` / `userId` parameter - NOT the username string).
+    """
     sm_url = f"{api_url}/JSON/sessionManagement/action/setSessionManagementMethod/"
     r = requests.get(sm_url, params={**base_params, 'contextId': context_id,
                                      'methodName': 'cookieBasedSessionManagement'},
@@ -170,7 +174,7 @@ def _setup_form_auth(auth: dict, context_id: int, api_url: str,
                                         'userId': int(user_id), 'credentials': credentials},
                      headers=headers, timeout=10)
     r.raise_for_status()
-    return user_name
+    return int(user_id)
 
 
 def _setup_header_auth(auth: dict, context_id: int, api_url: str,
@@ -208,13 +212,25 @@ def _start_ajax_spider(target: str, api_url: str, base_params: dict,
 
 
 def _start_spider(target: str, api_url: str, base_params: dict, headers: dict,
-                  context_name=None, spider_max_wait: int = 300) -> str:
-    """Starts the standard ZAP Spider, waits for 100%, and returns the scan id."""
-    print("        -> Initiating ZAP Spider...")
-    url = f"{api_url}/JSON/spider/action/scan/"
-    params = {**base_params, 'url': target}
-    if context_name:
-        params['contextName'] = context_name
+                  context_id=None, context_name=None, user_id=None,
+                  spider_max_wait: int = 300) -> str:
+    """
+    Starts the ZAP Spider, waits for 100%, and returns the scan id.
+
+    The standard spider API has no user parameter, so authenticated crawls
+    must use spider/action/scanAsUser (contextId + numeric userId). Without a
+    user the plain spider runs, scoped to a context when one is given.
+    """
+    if user_id is not None:
+        print("        -> Initiating ZAP Spider as authenticated user...")
+        url = f"{api_url}/JSON/spider/action/scanAsUser/"
+        params = {**base_params, 'url': target, 'contextId': int(context_id), 'userId': int(user_id)}
+    else:
+        print("        -> Initiating ZAP Spider...")
+        url = f"{api_url}/JSON/spider/action/scan/"
+        params = {**base_params, 'url': target}
+        if context_id is not None and context_name:
+            params['contextName'] = context_name
 
     r_spider = requests.get(url, params=params, headers=headers, timeout=10)
     r_spider.raise_for_status()
@@ -231,15 +247,17 @@ def _start_spider(target: str, api_url: str, base_params: dict, headers: dict,
 
 
 def _start_ascan(target: str, api_url: str, base_params: dict, headers: dict,
-                 context_id=None, user=None, ascan_max_wait: int = 900) -> str:
-    """Starts the ZAP Active Scan, waits for 100%, and returns the scan id."""
+                 context_id=None, user_id=None, ascan_max_wait: int = 900) -> str:
+    """Starts the ZAP Active Scan, waits for 100%, and returns the scan id.
+
+    `user` expects the numeric ZAP userId for the context (not a username)."""
     print("        -> Initiating ZAP Active Scan...")
     url = f"{api_url}/JSON/ascan/action/scan/"
     params = {**base_params, 'url': target}
     if context_id is not None:
         params['contextId'] = int(context_id)
-    if user:
-        params['user'] = user
+    if user_id is not None:
+        params['user'] = int(user_id)
 
     r_ascan = requests.get(url, params=params, headers=headers, timeout=10)
     r_ascan.raise_for_status()
@@ -294,7 +312,7 @@ def run_scan(target: str, api_url: str = 'http://localhost:8080', api_key: str =
 
     # --- Optional: authenticated + scoped scanning ---
     context_id = None
-    user = None
+    user_id = None
     auth_method = (auth or {}).get('method', 'none')
     if auth_method in ('form', 'header'):
         ctx_name = context_name or f"strikehound-{int(time.time())}"
@@ -303,7 +321,7 @@ def run_scan(target: str, api_url: str = 'http://localhost:8080', api_key: str =
             _include_target_in_context(target, api_url, base_params, headers, ctx_name)
 
             if auth_method == 'form':
-                user = _setup_form_auth(
+                user_id = _setup_form_auth(
                     auth, context_id, api_url, base_params, headers, user_name=f"sh-user-{int(time.time())}"
                 )
             else:
@@ -320,15 +338,18 @@ def run_scan(target: str, api_url: str = 'http://localhost:8080', api_key: str =
             print(f"    [!] Unexpected ZAP context/auth setup error: {e}")
             print("        Continuing unauthenticated - authenticated findings will be missing.")
             context_id = None
-            user = None
+            user_id = None
     elif auth_method != 'none':
         print(f"    [!] Unknown ZAP auth method '{auth_method}' - ignoring auth config.")
         auth_method = 'none'
 
     try:
-        # Step 1: Start the standard ZAP Spider
-        _start_spider(target, api_url, base_params, headers, context_name=ctx_name if context_id else None,
-                      spider_max_wait=spider_max_wait)
+        # Step 1: Start the ZAP Spider (as the context user when authenticated).
+        _start_spider(
+            target, api_url, base_params, headers,
+            context_id=context_id, context_name=ctx_name if context_id else None,
+            user_id=user_id, spider_max_wait=spider_max_wait,
+        )
 
         # Step 1.5: Optionally crawl with the headless-browser ajaxSpider too.
         if ajax_spider:
@@ -338,7 +359,7 @@ def run_scan(target: str, api_url: str = 'http://localhost:8080', api_key: str =
 
         # Step 2: Start the ZAP Active Scan (authenticated if a user was set up).
         _start_ascan(target, api_url, base_params, headers,
-                     context_id=context_id, user=user, ascan_max_wait=ascan_max_wait)
+                     context_id=context_id, user_id=user_id, ascan_max_wait=ascan_max_wait)
 
         # Step 3: Fetch the security alerts (vulnerabilities)
         print("        -> Fetching vulnerabilities from ZAP...")

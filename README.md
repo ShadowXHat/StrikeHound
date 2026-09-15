@@ -175,7 +175,18 @@ python3 -m pytest tests/ -v
 ### Verifying ZAP auth against a real daemon
 
 Unit tests mock ZAP's API. To verify the auth/context flow against your actual
-ZAP version:
+ZAP version (recommended before trusting authenticated findings in production):
+
+```bash
+# Kali / Debian — boots ZAP if needed, runs the checks, shuts it back down
+./scripts/verify_zap_auth.sh
+./scripts/verify_zap_auth.sh \
+    --target https://app.example.com \
+    --username svc-audit --password 's3cret' \
+    --login-url https://app.example.com/login
+```
+
+Or run the Python checker directly against a ZAP daemon you manage yourself:
 
 ```bash
 python3 scripts/zap_env_check.py --url http://localhost:8080 --target https://example.com
@@ -183,7 +194,14 @@ python3 scripts/zap_env_check.py --url http://localhost:8080 --target https://ex
     --username alice --password 's3cret' --login-url https://example.com/login
 ```
 
-Exit code 0 = reachable + context/auth working; 1 = failure (and it tells you which step).
+Exit code 0 = reachable + context/auth working; 1 = failure (it tells you which step).
+
+> **Authenticated crawling detail:** the plain ZAP spider API has no user
+> parameter, so form-auth scans crawl through `spider/action/scanAsUser`
+> (context + numeric user id) and run the active scan as that user
+> (`ascan/action/scan` with the user id — *not* the username). If your ZAP
+> version rejects either call, StrikeHound logs it and continues
+> unauthenticated rather than crashing.
 
 ## ⚠️ Legal Disclaimer
 
