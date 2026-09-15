@@ -137,8 +137,9 @@ def _setup_form_auth(auth: dict, context_id: int, api_url: str,
                      base_params: dict, headers: dict, user_name: str) -> int:
     """
     Configures form-based authentication and creates the scan user.
-    Returns the numeric ZAP userId (what spider/scanAsUser and ascan/scan
-    expect as the `user` / `userId` parameter - NOT the username string).
+    Returns the numeric ZAP userId (what spider/action/scanAsUser and
+    ascan/action/scanAsUser expect as their `userId` parameter - NOT the
+    username string).
     """
     sm_url = f"{api_url}/JSON/sessionManagement/action/setSessionManagementMethod/"
     r = requests.get(sm_url, params={**base_params, 'contextId': context_id,
@@ -250,14 +251,21 @@ def _start_ascan(target: str, api_url: str, base_params: dict, headers: dict,
                  context_id=None, user_id=None, ascan_max_wait: int = 900) -> str:
     """Starts the ZAP Active Scan, waits for 100%, and returns the scan id.
 
-    `user` expects the numeric ZAP userId for the context (not a username)."""
-    print("        -> Initiating ZAP Active Scan...")
-    url = f"{api_url}/JSON/ascan/action/scan/"
-    params = {**base_params, 'url': target}
-    if context_id is not None:
-        params['contextId'] = int(context_id)
+    As of ZAP 2.17 the plain ascan/action/scan no longer accepts a `user`
+    param - an authenticated scan must use ascan/action/scanAsUser
+    (contextId + numeric userId), otherwise it silently runs
+    unauthenticated. Without a user the plain scan runs, scoped to a
+    context when one is given."""
     if user_id is not None:
-        params['user'] = int(user_id)
+        print("        -> Initiating ZAP Active Scan as authenticated user...")
+        url = f"{api_url}/JSON/ascan/action/scanAsUser/"
+        params = {**base_params, 'url': target, 'contextId': int(context_id), 'userId': int(user_id)}
+    else:
+        print("        -> Initiating ZAP Active Scan...")
+        url = f"{api_url}/JSON/ascan/action/scan/"
+        params = {**base_params, 'url': target}
+        if context_id is not None:
+            params['contextId'] = int(context_id)
 
     r_ascan = requests.get(url, params=params, headers=headers, timeout=10)
     r_ascan.raise_for_status()
