@@ -1,6 +1,18 @@
 import os
 import json
+from collections import Counter
 from fpdf import FPDF
+from fpdf.enums import XPos, YPos
+
+SEVERITY_ORDER = ["Critical", "High", "Medium", "Low", "Info"]
+
+_SEVERITY_COLOR = {
+    "critical": (200, 30, 30),
+    "high": (200, 30, 30),
+    "medium": (220, 120, 0),
+    "low": (30, 100, 200),
+    "info": (80, 80, 80),
+}
 
 
 def safe_filename_from_target(target: str) -> str:
@@ -10,8 +22,15 @@ def safe_filename_from_target(target: str) -> str:
     return cleaned
 
 
+def _report_base(target: str, output_dir: str) -> tuple:
+    os.makedirs(output_dir, exist_ok=True)
+    base = safe_filename_from_target(target)
+    return os.path.join(output_dir, f"StrikeHound_Report_{base}")
+
+
 def generate_sarif(findings, target, output_file):
-    sarif_skeleton = {
+    """Writes findings as SARIF 2.1.0 so they plug into GitHub code scanning."""
+    sarif = {
         "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
         "version": "2.1.0",
         "runs": [{
@@ -27,21 +46,51 @@ def generate_sarif(findings, target, output_file):
         }]
     }
 
-    for idx, item in enumerate(findings):
-        rule_id = f"SH-{idx+1:04d}"
-        sarif_skeleton["runs"][0]["results"].append({
+    driver = sarif["runs"][0]["tool"]["driver"]
+    results = sarif["runs"][0]["results"]
+    rule_ids = {}
+
+    for item in findings:
+        title = item.get("title") or item.get("name") or "Vulnerability Detected"
+        rule_id = f"SH-{len(rule_ids) + 1:04d}"
+
+        rule_ids.setdefault(rule_id, title)
+        driver["rules"].append({
+            "id": rule_id,
+            "name": "strikehound-rule",
+            "shortDescription": {"text": title},
+            "fullDescription": {"text": item.get("description", "No description provided.")},
+            "defaultConfiguration": {"level": "error" if str(item.get("severity", "")).lower() in ("critical", "high") else "warning"},
+        })
+
+        severity = str(item.get("severity", "info")).lower()
+        level = "error" if severity in ("critical", "high") else ("warning" if severity == "medium" else "note")
+
+        results.append({
             "ruleId": rule_id,
-            "message": {"text": item.get("name", "Vulnerability Detected")},
-            "level": "error" if str(item.get("severity")).lower() in ['critical', 'high'] else "warning",
+            "level": level,
+            "message": {"text": title},
             "locations": [{
                 "physicalLocation": {
-                    "artifactLocation": {"uri": item.get("url", target)}
+                    "artifactLocation": {"uri": item.get("matched_at") or item.get("target") or target}
                 }
             }]
         })
 
     with open(output_file, 'w') as f:
-        json.dump(sarif_skeleton, f, indent=2)
+        json.dump(sarif, f, indent=2)
+
+
+def generate_json(findings, target, output_file):
+    """Writes the deduplicated findings as JSON for machine consumption."""
+    payload = {
+        "target": target,
+        "total_findings": len(findings),
+        "severity_counts": dict(Counter(str(f.get("severity", "Info")) for f in findings)),
+        "findings": findings,
+    }
+    with open(output_file, 'w') as f:
+        json.dump(payload, f, indent=2)
 
 
 def generate_report(findings, target, output_dir, open_ports) -> str:
@@ -54,32 +103,52 @@ def generate_report(findings, target, output_dir, open_ports) -> str:
     pdf.add_page()
 
     # Document Header
-    pdf.set_font("Arial", 'B', 22)
-    pdf.cell(0, 15, txt="StrikeHound Security Report", ln=True, align='C')
+    pdf.set_font("Helvetica", 'B', 22)
+    pdf.cell(0, 15, text="StrikeHound Security Report", new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
     pdf.ln(4)
 
     # Scan Metadata
-    pdf.set_font("Arial", 'B', 10)
-    pdf.cell(30, 6, "Target:", 0, 0)
-    pdf.set_font("Arial", size=10)
-    pdf.cell(0, 6, str(target), 0, 1)
+    pdf.set_font("Helvetica", 'B', 10)
+    pdf.cell(30, 6, text="Target:", new_x=XPos.RIGHT, new_y=YPos.TOP)
+    pdf.set_font("Helvetica", size=10)
+    pdf.cell(0, 6, text=str(target), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-    pdf.set_font("Arial", 'B', 10)
-    pdf.cell(30, 6, "Open Ports:", 0, 0)
-    pdf.set_font("Arial", size=10)
+    pdf.set_font("Helvetica", 'B', 10)
+    pdf.cell(30, 6, text="Open Ports:", new_x=XPos.RIGHT, new_y=YPos.TOP)
+    pdf.set_font("Helvetica", size=10)
     ports_str = ', '.join(map(str, open_ports)) if open_ports else "80, 443"
-    pdf.cell(0, 6, ports_str, 0, 1)
+    pdf.cell(0, 6, text=ports_str, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(6)
 
     # Vulnerability Summary Header
-    pdf.set_font("Arial", 'B', 14)
-    pdf.cell(0, 8, txt="Vulnerability Summary", ln=True)
+    pdf.set_font("Helvetica", 'B', 14)
+    pdf.cell(0, 8, text="Vulnerability Summary", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(2)
 
     if not findings:
-        pdf.set_font("Arial", size=10)
+        pdf.set_font("Helvetica", size=10)
         pdf.set_text_color(80, 80, 80)
-        pdf.cell(0, 6, "No findings were reported for this target.", ln=True)
+        pdf.cell(0, 6, text="No findings were reported for this target.", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    # Severity counts summary
+    sev_counts = Counter()
+    for f in findings:
+        if isinstance(f, dict):
+            sev_counts[str(f.get('severity') or 'Info').capitalize()] += 1
+
+    if findings:
+        pdf.set_font("Helvetica", size=10)
+        counted = 0
+        for sev in SEVERITY_ORDER:
+            if sev in sev_counts:
+                pdf.set_text_color(*_SEVERITY_COLOR.get(sev.lower(), (80, 80, 80)))
+                pdf.cell(0, 6, text=f"      {sev}: {sev_counts[sev]}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                counted += 1
+        if counted == 0:
+            pdf.set_text_color(80, 80, 80)
+            pdf.cell(0, 6, text="      No severity-normalized findings.", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(4)
 
     for raw_issue in findings:
         # Normalize issue to dict if passed as string
@@ -124,28 +193,22 @@ def generate_report(findings, target, output_dir, open_ports) -> str:
         ).capitalize()
 
         # Severity Colors
-        if severity.lower() in ['critical', 'high']:
-            pdf.set_text_color(200, 30, 30)
-        elif severity.lower() == 'medium':
-            pdf.set_text_color(220, 120, 0)
-        elif severity.lower() == 'low':
-            pdf.set_text_color(30, 100, 200)
-        else:
-            pdf.set_text_color(80, 80, 80)
+        pdf.set_text_color(*_SEVERITY_COLOR.get(severity.lower(), (80, 80, 80)))
 
-        pdf.set_font("Arial", 'B', 10)
-        pdf.cell(0, 6, f"[{severity}] {name}", ln=True)
+        pdf.set_font("Helvetica", 'B', 10)
+        pdf.cell(0, 6, text=f"[{severity}] {name}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-        pdf.set_font("Arial", size=9)
+        pdf.set_font("Helvetica", size=9)
         pdf.set_text_color(60, 60, 60)
-        pdf.multi_cell(0, 5, f"Matched Endpoint: {url}")
+        pdf.multi_cell(0, 5, f"Matched Endpoint: {url}\nDescription: {issue.get('description') or info.get('description') or 'No description provided.'}")
+
+        remediation = issue.get('remediation') or info.get('remediation')
+        if remediation:
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 5, f"How to Fix: {remediation}")
         pdf.ln(3)
 
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    filename = f"StrikeHound_Report_{safe_filename_from_target(target)}.pdf"
-    report_path = os.path.join(output_dir, filename)
+    report_path = f"{_report_base(target, output_dir)}.pdf"
     pdf.output(report_path)
     print(f"[+] Report generated successfully: {report_path}")
 

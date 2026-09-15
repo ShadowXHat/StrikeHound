@@ -4,7 +4,7 @@ import os
 from .validators import is_safe_target
 
 
-def run_scan(target: str, profile_flags: str) -> dict:
+def run_scan(target: str, profile_flags: str, output_dir: str = "output") -> dict:
     """
     Executes the Nmap scan and returns parsed open ports.
     Returns: { port_number: { 'state': state, 'service': service, 'version': version } }
@@ -26,13 +26,16 @@ def run_scan(target: str, profile_flags: str) -> dict:
 
     print(f"    [>] Executing Nmap against {target} with flags: {profile_flags}")
 
-    # Initialize the nmap PortScanner
-    nm = nmap.PortScanner()
-
-    # Ensure output directory exists for the XML dump
-    os.makedirs('output', exist_ok=True)
+    # Ensure the output directory exists for the XML dump
+    os.makedirs(output_dir, exist_ok=True)
 
     try:
+        # Initialize the nmap PortScanner. This raises PortScannerError
+        # immediately if the nmap binary isn't installed, so it must live
+        # inside the try block - construction failing should degrade the
+        # pipeline, not crash it.
+        nm = nmap.PortScanner()
+
         # Run the scan WITHOUT the -oX flag in the arguments
         nm.scan(hosts=target, arguments=profile_flags)
 
@@ -41,7 +44,7 @@ def run_scan(target: str, profile_flags: str) -> dict:
         if isinstance(xml_output, bytes):
             xml_output = xml_output.decode('utf-8')
 
-        with open("output/nmap_result.xml", "w") as f:
+        with open(os.path.join(output_dir, "nmap_result.xml"), "w") as f:
             f.write(xml_output)
 
     except nmap.PortScannerError as e:
@@ -62,9 +65,9 @@ def run_scan(target: str, profile_flags: str) -> dict:
                 if state == 'open':
                     parsed_results[port] = {
                         'state': state,
-                        'service': nm[host][proto][port]['name'],
-                        'version': nm[host][proto][port]['version']
+                        'service': nm[host][proto][port].get('name', ''),
+                        'version': nm[host][proto][port].get('version', ''),
                     }
-                    print(f"        -> Discovered open port: {port}/tcp ({nm[host][proto][port]['name']})")
+                    print(f"        -> Discovered open port: {port}/tcp ({nm[host][proto][port].get('name', '')})")
 
     return parsed_results

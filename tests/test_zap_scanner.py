@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from unittest.mock import patch, MagicMock
 import pytest
 
-from modules.zap_scanner import run_scan, is_zap_ready, ZapScanError, _poll_scan_status
+from modules.zap_scanner import run_scan, is_zap_ready, wait_for_zap, ZapScanError, _poll_scan_status
 
 
 def _mock_response(json_data, status_code=200):
@@ -34,6 +34,30 @@ def test_is_zap_ready_false_on_connection_error():
     import requests
     with patch("modules.zap_scanner.requests.get", side_effect=requests.exceptions.ConnectionError):
         assert is_zap_ready("http://localhost:8080") is False
+
+
+def test_wait_for_zap_bounds_wall_clock_not_sleep_time():
+    """
+    Regression: wait_for_zap previously summed `interval` sleep time, so
+    when each poll call itself blocked for several seconds (slow
+    connection failure on localhost), the total wait overran max_wait
+    badly. It must now respect the wall-clock deadline.
+    """
+    import time
+
+    def slow_poll(*args, **kwargs):
+        time.sleep(0.2)  # blocking poll longer than the 0.05s interval
+        return False
+
+    with patch("modules.zap_scanner.is_zap_ready", side_effect=slow_poll):
+        start = time.monotonic()
+        ok = wait_for_zap("http://localhost:8080", max_wait=0.5, interval=0.05)
+        elapsed = time.monotonic() - start
+
+    assert ok is False
+    # Polls block for 0.2s each; if we only counted sleep the loop would
+    # run several more cycles and take far longer. Wall-clock timing bounds it.
+    assert elapsed < 1.2
 
 
 def test_run_scan_skips_when_zap_unreachable():

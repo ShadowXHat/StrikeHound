@@ -6,6 +6,19 @@ tools:
   zap_api_key: your_zap_api_key
   slack_webhook: YOUR_WEBHOOK_URL
 
+# Forwarded to Nuclei to keep scans production-friendly and low-noise.
+# rate_limit: max requests/sec (Nuclei defaults to 150 - too aggressive for
+#             most production targets/WAFs). 30-50 is a safe starting point.
+# tags/severity: optional template filters, e.g. "cve,exposure" / "high,critical".
+nuclei:
+  rate_limit: 50
+  concurrency: 25
+  bulk_size: 10
+  timeout: 10
+  retries: 1
+  tags: ""
+  severity: ""
+
 scan_profiles:
   quick: '-F -T4'
   standard: '-sV -sC -T4'

@@ -8,7 +8,7 @@ By acting as a central brain, StrikeHound eliminates manual scanning fatigue. It
 * **Intelligent Orchestration:** Automatically triggers web-scanners only if web ports (80/443) are discovered.
 * **Background Daemon Management:** Boots and cleanly terminates OWASP ZAP in the background, even on failure.
 * **Data Normalization:** Parses complex XML and JSON outputs from multiple tools and maps them to a unified severity scale.
-* **Smart Deduplication:** Identifies overlapping vulnerabilities caught by different tools to reduce alert fatigue.
+* **Smart Deduplication:** Identifies overlapping vulnerabilities caught by different tools using a deterministic, normalized fingerprint (title/host/port) and keeps the highest severity — reproducible across runs and across tools.
 * **Executive PDF Reporting:** Generates color-coded, professional PDF reports with infrastructure summaries.
 * **Slack Integration:** Fires real-time webhook alerts to your security team upon scan completion.
 
@@ -44,6 +44,7 @@ You only need to run this once. To customize settings afterward (e.g. add a Slac
 | `tools.zap_api_url` | Base URL where the ZAP daemon's API is reachable |
 | `tools.zap_api_key` | ZAP API key (leave blank if `api.disablekey=true`) |
 | `tools.slack_webhook` | Slack Incoming Webhook URL for scan-complete alerts |
+| `nuclei.*` | Tuning passed to Nuclei: `rate_limit` (req/s, Nuclei defaults to 150 - too aggressive for most targets), `concurrency`, `bulk_size`, `timeout`, `retries`, and optional `tags`/`severity` template filters |
 | `scan_profiles.*` | Nmap flag presets used by `-m/--profile` |
 | `severity_map.*` | Maps each tool's native severity values to Critical/High/Medium/Low/Info |
 
@@ -67,6 +68,21 @@ python3 strikehound.py -t http://example.com -m standard
 | `-m`, `--profile` | Nmap scan depth: `quick`, `standard`, `full` | `standard` |
 | `-o`, `--output-dir` | Where to write the report and scan output | `./output` |
 | `--no-report` | Skip PDF generation | off |
+| `--fail-on` | Exit with code 1 if any finding is at/above `critical`, `high`, `medium`, `low`, or `info` — a CI gate | off |
+
+### Outputs
+
+Every scan always emits two machine-readable files next to the optional PDF:
+`StrikeHound_Report_<target>.sarif` (SARIF 2.1.0, importable into GitHub code
+scanning) and `StrikeHound_Report_<target>.json` (full deduplicated findings).
+
+### CI gate example
+
+```bash
+python3 strikehound.py -t http://staging.example.com -m quick --fail-on high
+```
+
+Fails the build (exit 1) if any High or Critical finding is present.
 
 ## 🧪 Testing
 

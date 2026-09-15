@@ -19,14 +19,18 @@ def is_zap_ready(zap_url: str = "http://localhost:8080", timeout: float = 2.0) -
 def wait_for_zap(zap_url: str = "http://localhost:8080", max_wait: int = 30, interval: float = 1.0) -> bool:
     """
     Polls the ZAP daemon until it responds or max_wait seconds elapse.
+
+    Bounds the total wall-clock time, not just the sleep time: each poll
+    call is itself blocking for up to `timeout` seconds (and a failed
+    connection to localhost can take several seconds on some platforms),
+    so counting only `interval` would let the wait overrun max_wait badly.
     Returns True if ZAP became ready, False if it timed out.
     """
-    waited = 0.0
-    while waited < max_wait:
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
         if is_zap_ready(zap_url):
             return True
         time.sleep(interval)
-        waited += interval
     return False
 
 
@@ -126,6 +130,7 @@ def run_scan(target: str, api_url: str = 'http://localhost:8080', api_key: str =
         alerts = r_alerts.json().get('alerts', [])
 
         # Step 5: Normalize the raw ZAP data into the StrikeHound format
+        scheme_port = 443 if str(target).lower().startswith("https") else 80
         for alert in alerts:
             try:
                 risk_code = int(alert.get('riskCode', 0))
@@ -136,7 +141,7 @@ def run_scan(target: str, api_url: str = 'http://localhost:8080', api_key: str =
                 "title": alert.get('name'),
                 "severity": risk_code,
                 "target": target,
-                "port": 80,
+                "port": scheme_port,
                 "description": alert.get('description'),
                 "remediation": alert.get('solution', 'No remediation provided by ZAP.')
             })

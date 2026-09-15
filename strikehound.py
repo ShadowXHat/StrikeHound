@@ -20,6 +20,9 @@ from modules import report_generator as report
 
 ZAP_BOOT_TIMEOUT_SECONDS = 30
 
+# Used by --fail-on: the weight of the worst finding determines the exit code.
+FAIL_SEVERITY_WEIGHTS = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+
 
 def load_config(config_path="config.yaml"):
     try:
@@ -40,12 +43,24 @@ def clean_target_for_nmap(target: str) -> str:
     return target
 
 
+def worst_finding_severity(findings) -> str:
+    """Returns the label of the highest-severity finding ('Info' if none)."""
+    worst = "info"
+    for f in findings:
+        sev = str(f.get('severity', 'Info')).strip().lower()
+        if FAIL_SEVERITY_WEIGHTS.get(sev, 0) > FAIL_SEVERITY_WEIGHTS.get(worst, 0):
+            worst = sev
+    return worst
+
+
 def main():
     parser = argparse.ArgumentParser(description="StrikeHound: Automated Security Scanning & Reporting Framework")
     parser.add_argument("-t", "--target", required=True, help="Target IP or URL to scan")
     parser.add_argument("-m", "--profile", choices=["quick", "standard", "full"], default="standard", help="Nmap scan depth (mode)")
     parser.add_argument("-o", "--output-dir", default="./output", help="Where to write results")
     parser.add_argument("--no-report", action="store_true", help="Skip PDF generation")
+    parser.add_argument("--fail-on", choices=["critical", "high", "medium", "low", "info"], default=None,
+                        help="Exit with code 1 if any finding is at or above this severity. Useful as a CI gate.")
     args = parser.parse_args()
 
     if not is_safe_target(args.target):
@@ -94,7 +109,7 @@ def main():
         print("\n[*] Phase 1: Running Discovery Scan (Nmap)...")
         nmap_target = clean_target_for_nmap(args.target)
         nmap_flags = config.get('scan_profiles', {}).get(args.profile, '-sV -sC -T4')
-        open_ports_dict = nmap_scanner.run_scan(nmap_target, nmap_flags)
+        open_ports_dict = nmap_scanner.run_scan(nmap_target, nmap_flags, args.output_dir)
         open_ports = list(open_ports_dict.keys())
 
         # If Nmap fails or finds nothing, still try web scanners if a URL was given
@@ -110,7 +125,17 @@ def main():
 
             # --- Nuclei ---
             nuclei_path = config.get('tools', {}).get('nuclei_path', 'nuclei')
-            nuclei_results = nuclei_scanner.run_scan(args.target, nuclei_path)
+            nuclei_cfg = config.get('nuclei', {}) or {}
+            nuclei_results = nuclei_scanner.run_scan(
+                args.target, nuclei_path, output_dir=args.output_dir,
+                rate_limit=nuclei_cfg.get('rate_limit', nuclei_scanner.DEFAULT_RATE_LIMIT),
+                concurrency=nuclei_cfg.get('concurrency', nuclei_scanner.DEFAULT_CONCURRENCY),
+                bulk_size=nuclei_cfg.get('bulk_size', nuclei_scanner.DEFAULT_BULK_SIZE),
+                timeout=nuclei_cfg.get('timeout', nuclei_scanner.DEFAULT_TIMEOUT),
+                retries=nuclei_cfg.get('retries', nuclei_scanner.DEFAULT_RETRIES),
+                tags=nuclei_cfg.get('tags', ''),
+                severity=nuclei_cfg.get('severity', ''),
+            )
             for finding in nuclei_results:
                 finding['severity'] = severity_mapper.normalize('nuclei', finding.get('severity'), severity_map)
             raw_findings.extend(nuclei_results)
@@ -146,7 +171,17 @@ def main():
         print("\n[*] Phase 3: Deduplicating and Normalizing Findings...")
         normalized_findings = deduplicator.deduplicate(raw_findings)
 
+        # --- Phase 3.5: Machine-readable output (always emitted) ---
+        base = os.path.join(args.output_dir, f"StrikeHound_Report_{report.safe_filename_from_target(args.target)}")
+        sarif_path = f"{base}.sarif"
+        json_path = f"{base}.json"
+        report.generate_sarif(normalized_findings, args.target, sarif_path)
+        report.generate_json(normalized_findings, args.target, json_path)
+        print(f"[+] SARIF written: {sarif_path}")
+        print(f"[+] JSON written: {json_path}")
+
         # --- Phase 4: Report Generation ---
+        report_path = None
         if args.no_report:
             print("\n[*] Phase 4: Skipping PDF generation (--no-report).")
         elif normalized_findings:
@@ -157,8 +192,19 @@ def main():
             slack_notifier.send_alert(slack_url, args.target, len(normalized_findings), report_path)
         else:
             print("\n[*] Phase 4: No findings to report. Skipping PDF generation.")
+            report_path = json_path
 
         print("\n[+] Pipeline execution complete!")
+
+        # --- Phase 5: CI severity gate ---
+        if args.fail_on:
+            worst = worst_finding_severity(normalized_findings)
+            threshold = FAIL_SEVERITY_WEIGHTS[args.fail_on]
+            if FAIL_SEVERITY_WEIGHTS.get(worst, 0) >= threshold:
+                print(f"[!] --fail-on {args.fail_on} triggered: worst severity is '{worst.upper()}'.")
+                return 1
+            print(f"[+] --fail-on {args.fail_on} passed: worst severity is '{worst.upper()}'.")
+        return 0
 
     finally:
         # Always attempt to clean up the ZAP daemon, even if something above crashed.
@@ -172,4 +218,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

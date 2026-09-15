@@ -15,6 +15,13 @@ _HOSTNAME_RE = re.compile(
 )
 _IPV4_RE = re.compile(r"^(\d{1,3}\.){3}\d{1,3}$")
 
+
+def _is_valid_ipv4(candidate: str) -> bool:
+    """True if candidate is an IPv4 address where every octet is 0-255."""
+    if not _IPV4_RE.match(candidate):
+        return False
+    return all(0 <= int(octet) <= 255 for octet in candidate.split("."))
+
 # Characters that have no business being in a hostname/IP and could be
 # used to smuggle extra flags/arguments into a downstream tool.
 _SUSPICIOUS_CHARS = set(" \t\n;|&$`<>(){}\\\"'")
@@ -43,7 +50,7 @@ def is_safe_target(raw_target: str) -> bool:
         candidate = parsed.netloc.split(":")[0].strip("[]")
 
     if _IPV4_RE.match(candidate):
-        return True
+        return _is_valid_ipv4(candidate)
 
     if _HOSTNAME_RE.match(candidate):
         return True

@@ -88,6 +88,15 @@ tools:
   zap_api_key: ""
   slack_webhook: ""
 
+nuclei:
+  rate_limit: 50
+  concurrency: 25
+  bulk_size: 10
+  timeout: 10
+  retries: 1
+  tags: ""
+  severity: ""
+
 scan_profiles:
   quick: '-F -T4'
   standard: '-sV -sC -T4'
@@ -105,7 +114,11 @@ severity_map:
     1: Medium
     0: Low
   ssh_audit:
+    critical: Critical
+    high: High
+    medium: Medium
     low: Low
+    info: Info
 EOF
     echo "[+] config.yaml created."
 else

@@ -55,3 +55,10 @@ def test_rejects_overly_long_target():
 
 def test_accepts_ipv6_loopback():
     assert is_safe_target("::1") is True
+
+
+def test_rejects_invalid_ipv4_octets():
+    assert is_safe_target("999.999.999.999") is False
+    assert is_safe_target("256.1.1.1") is False
+    assert is_safe_target("0.0.0.0") is True
+    assert is_safe_target("255.255.255.255") is True
