@@ -6,6 +6,26 @@ from fpdf.enums import XPos, YPos
 
 SEVERITY_ORDER = ["Critical", "High", "Medium", "Low", "Info"]
 
+_FONT_PATHS = [
+    ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+    ("/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf"),
+]
+
+_REGULAR_FONT, _BOLD_FONT = next(
+    (regular, bold) for regular, bold in _FONT_PATHS
+    if os.path.isfile(regular) and os.path.isfile(bold)
+) if any(os.path.isfile(r) and os.path.isfile(b) for r, b in _FONT_PATHS) else (None, None)
+
+FONT_FAMILY = "StrikeHoundUnicode" if _REGULAR_FONT else "Helvetica"
+
+
+def _register_font(pdf: FPDF) -> None:
+    """Registers a Unicode TTF font when available so non-Latin-1 text (e.g.
+    em dashes, smart quotes) renders in PDFs; falls back to Helvetica."""
+    if FONT_FAMILY == "StrikeHoundUnicode":
+        pdf.add_font("StrikeHoundUnicode", "", _REGULAR_FONT)
+        pdf.add_font("StrikeHoundUnicode", "B", _BOLD_FONT)
+
 _SEVERITY_COLOR = {
     "critical": (200, 30, 30),
     "high": (200, 30, 30),
@@ -100,33 +120,34 @@ def generate_report(findings, target, output_dir, open_ports) -> str:
     """
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
+    _register_font(pdf)
     pdf.add_page()
 
     # Document Header
-    pdf.set_font("Helvetica", 'B', 22)
+    pdf.set_font(FONT_FAMILY, 'B', 22)
     pdf.cell(0, 15, text="StrikeHound Security Report", new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
     pdf.ln(4)
 
     # Scan Metadata
-    pdf.set_font("Helvetica", 'B', 10)
+    pdf.set_font(FONT_FAMILY, 'B', 10)
     pdf.cell(30, 6, text="Target:", new_x=XPos.RIGHT, new_y=YPos.TOP)
-    pdf.set_font("Helvetica", size=10)
+    pdf.set_font(FONT_FAMILY, size=10)
     pdf.cell(0, 6, text=str(target), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-    pdf.set_font("Helvetica", 'B', 10)
+    pdf.set_font(FONT_FAMILY, 'B', 10)
     pdf.cell(30, 6, text="Open Ports:", new_x=XPos.RIGHT, new_y=YPos.TOP)
-    pdf.set_font("Helvetica", size=10)
+    pdf.set_font(FONT_FAMILY, size=10)
     ports_str = ', '.join(map(str, open_ports)) if open_ports else "80, 443"
     pdf.cell(0, 6, text=ports_str, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(6)
 
     # Vulnerability Summary Header
-    pdf.set_font("Helvetica", 'B', 14)
+    pdf.set_font(FONT_FAMILY, 'B', 14)
     pdf.cell(0, 8, text="Vulnerability Summary", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(2)
 
     if not findings:
-        pdf.set_font("Helvetica", size=10)
+        pdf.set_font(FONT_FAMILY, size=10)
         pdf.set_text_color(80, 80, 80)
         pdf.cell(0, 6, text="No findings were reported for this target.", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
@@ -137,7 +158,7 @@ def generate_report(findings, target, output_dir, open_ports) -> str:
             sev_counts[str(f.get('severity') or 'Info').capitalize()] += 1
 
     if findings:
-        pdf.set_font("Helvetica", size=10)
+        pdf.set_font(FONT_FAMILY, size=10)
         counted = 0
         for sev in SEVERITY_ORDER:
             if sev in sev_counts:
@@ -195,10 +216,10 @@ def generate_report(findings, target, output_dir, open_ports) -> str:
         # Severity Colors
         pdf.set_text_color(*_SEVERITY_COLOR.get(severity.lower(), (80, 80, 80)))
 
-        pdf.set_font("Helvetica", 'B', 10)
+        pdf.set_font(FONT_FAMILY, 'B', 10)
         pdf.cell(0, 6, text=f"[{severity}] {name}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-        pdf.set_font("Helvetica", size=9)
+        pdf.set_font(FONT_FAMILY, size=9)
         pdf.set_text_color(60, 60, 60)
         pdf.multi_cell(0, 5, f"Matched Endpoint: {url}\nDescription: {issue.get('description') or info.get('description') or 'No description provided.'}")
 
